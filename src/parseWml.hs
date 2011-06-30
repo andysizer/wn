@@ -180,6 +180,7 @@ pConcatString =
 
 formulaAttValue = between (char '(') (char ')') (many (noneOf ")"))
 
+-- NB should probably 'trim' this.
 defaultAttValue = String <$> anyChar `manyTill` eol
 
 tagName = manyTill namechars rb <* spaces
