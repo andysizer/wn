@@ -6,27 +6,11 @@ module ParseWml
     where
 
 import Data.List
-import Control.Monad
-import Text.ParserCombinators.Parsec.Error
 import Text.Parsec.Prim (unexpected)
 
 import ApplicativeParsec
 
-data Attribute = Attribute
-    {
-      aKey  :: String
-    , aValue :: String
-    }
-        deriving (Eq, Show)
-
-data Mattribute = Mattribute
-    {
-      mKeys  :: [String]
-    , mValues :: [String]
-    }
-        deriving (Eq, Show)
-
-
+-- default node type including top level
 data Node = Node
     {
       nName :: String
@@ -34,6 +18,7 @@ data Node = Node
     }
         deriving (Eq, Show)
 
+-- merge nodes 
 data MergeNode = MergeNode
     {
       mName :: String
@@ -41,20 +26,23 @@ data MergeNode = MergeNode
     }
         deriving (Eq, Show)
 
+type NodeBody = [NodeItem]
+
 data NodeItem = NAtt Attribute
               | NMatt Mattribute 
               | NNode Node
               | NMNode MergeNode
         deriving (Eq, Show)
 
-type NodeBody = [NodeItem]
+topLevelNode = 
+    do spaces
+       lbracket
+       (NNode n) <- node
+       return n
 
---node :: CharParser () (Either [Char] Node)
 node = parseNode NNode Node startTag
 
-node' = parseNode NNode Node startTag'
-
-mergeNode = parseNode NMNode MergeNode startTag'
+mergeNode = parseNode NMNode MergeNode startTag
 
 -- need type decl to get it to type check
 parseNode :: (a -> NodeItem) -> (String -> NodeBody -> a) -> CharParser () String  -> CharParser () NodeItem
@@ -70,9 +58,7 @@ mkNode c1 c2 s b e
     = unexpected (": end tag '" ++ e ++ "' does not match '" ++ s ++ "'")
 
 
-startTag = try (lbracket *> startTag')
-
-startTag' = tagName <* rbracket
+startTag = tagName <* rbracket
 
 endTag = try(lbracket *> fslash *> tagName <* rbracket)
 
@@ -81,19 +67,36 @@ nodeBody =
     <|> nodeBody'
 
 nodeBody' = 
-    do i <- nodeItem
+    do spaces
+       i <- nodeItem
        r <- nodeBody
        return $ (i : r)
 
 emptyBody = try(spaces *> lookAhead endTag) *> (return $ [])
 
 nodeItem = 
-        try( spaces *> (NAtt <$> singleAttribute))
-    <|> lbracket *> internalNode
+        spaces *> lbracket *> internalNode
+    <|> try( spaces *> (NAtt <$> singleAttribute))
 
 internalNode =
         char '+' *> mergeNode
-    <|> node'
+    <|> node
+
+
+data Attribute = Attribute
+    {
+      aKey  :: String
+    , aValue :: String
+    }
+        deriving (Eq, Show)
+
+data Mattribute = Mattribute
+    {
+      mKeys  :: [String]
+    , mValues :: [String]
+    }
+        deriving (Eq, Show)
+
 
 singleAttribute = lookAhead isSingleAttribute *> singleAttribute' 
 
@@ -153,7 +156,7 @@ wmlVarName = many namechars
 namechars' = ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9'] ++ ['_']
 namechars = oneOf namechars' 
 
-lbracket = spaces *> char '['
+lbracket = char '['
 rbracket = char ']'
 fslash = char '/'
 
