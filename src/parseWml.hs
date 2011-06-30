@@ -40,16 +40,17 @@ topLevelNode =
        (NNode n) <- node
        return n
 
-node = parseNode NNode Node startTag
+node = parseNode NNode Node
 
-mergeNode = parseNode NMNode MergeNode startTag
+mergeNode = parseNode NMNode MergeNode
 
+-- Main node parser
 -- need type decl to get it to type check
-parseNode :: (a -> NodeItem) -> (String -> NodeBody -> a) -> CharParser () String  -> CharParser () NodeItem
-parseNode c1 c2 tp =
-    do start <- tp
+parseNode :: (a -> NodeItem) -> (String -> NodeBody -> a) -> CharParser () NodeItem
+parseNode c1 c2 =
+    do start <- tagName
        body <- nodeBody
-       end <- endTag
+       end <- tagName
        mkNode c1 c2 start body end
 
 mkNode c1 c2 s b e
@@ -57,26 +58,23 @@ mkNode c1 c2 s b e
     | otherwise 
     = unexpected (": end tag '" ++ e ++ "' does not match '" ++ s ++ "'")
 
-
-startTag = tagName <* rbracket
-
-endTag = try(lbracket *> fslash *> tagName <* rbracket)
-
+-- Next three control paring node bodies. NB no 'try's.
 nodeBody = 
-        emptyBody
-    <|> nodeBody'
+        lbracket *> maybeEndBody
+    <|> attributeThenNodeBody
 
-nodeBody' = 
-    do spaces
-       i <- nodeItem
-       r <- nodeBody
-       return $ (i : r)
+maybeEndBody =
+        fslash *> (return [])
+    <|> do n <- internalNode
+           spaces
+           r <- nodeBody
+           return $ (n : r)
 
-emptyBody = try(spaces *> lookAhead endTag) *> (return $ [])
-
-nodeItem = 
-        spaces *> lbracket *> internalNode
-    <|> try( spaces *> (NAtt <$> singleAttribute))
+attributeThenNodeBody =
+    do a <- attribute
+       spaces
+       b <- nodeBody
+       return $ (a : b)
 
 internalNode =
         char '+' *> mergeNode
@@ -97,6 +95,7 @@ data Mattribute = Mattribute
     }
         deriving (Eq, Show)
 
+attribute = singleAttribute
 
 singleAttribute = lookAhead isSingleAttribute *> singleAttribute' 
 
@@ -106,7 +105,7 @@ singleAttribute' =
     do name <- attName
        equals
        value <- singleAttValue
-       return $ Attribute name value
+       return $ NAtt $ Attribute name value
 
 singleAttValue = 
         char '_' *> translatableAttValue
@@ -147,11 +146,11 @@ pConcatString =
 
 formulaAttValue = undefined
 
-defaultAttValue = do anyChar `manyTill` eol
+defaultAttValue = anyChar `manyTill` eol
 
-tagName = many namechars
-attName = many namechars
-wmlVarName = many namechars
+tagName = manyTill namechars rbracket <* spaces
+attName = many namechars <* spaces
+wmlVarName = many namechars <* spaces
 
 namechars' = ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9'] ++ ['_']
 namechars = oneOf namechars' 
@@ -160,7 +159,7 @@ lbracket = char '['
 rbracket = char ']'
 fslash = char '/'
 
-equals = try(spaces *> char '=' <* spaces)
+equals = char '=' <* spaces
 plus = try(spaces *> char '+' <* spaces)
 
 eol =   
