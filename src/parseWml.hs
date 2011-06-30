@@ -57,20 +57,20 @@ mergeNode = parseNode NMNode MergeNode
 -- Top Level Node parser 
 topLevelNode = 
     do spaces
-       lbracket
+       lb
        (NNode n) <- node
        return n
 
 -- parsing node bodies. NB no 'try's.
 nodeBody = 
-        lbracket *> maybeEndBody
+        lb *> maybeEndBody
     <|> attributeThenNodeBody
 
 -- maybeEndBody
 -- we just hit [, so its either an end tag (NB don't consume the tag name)  
 -- or a node followed by...
 maybeEndBody =
-        fslash *> (return [])
+        char '/' *> (return [])
     <|> do n <- internalNode
            spaces
            r <- nodeBody
@@ -160,6 +160,7 @@ quotedAttValue =
 
 quotedAttValue' = 
     do s <- pString
+       spaces
        r <- pConcatString
        return $ s ++ r
 
@@ -173,7 +174,7 @@ pString' =
     <|> return []
 
 pConcatString = 
-        plus *> char '"' *> quotedAttValue'
+        plus *> spaces *> char '"' *> quotedAttValue'
     <|> return []
             
 
@@ -181,18 +182,17 @@ formulaAttValue = between (char '(') (char ')') (many (noneOf ")"))
 
 defaultAttValue = String <$> anyChar `manyTill` eol
 
-tagName = manyTill namechars rbracket <* spaces
+tagName = manyTill namechars rb <* spaces
 attName = many namechars <* spaces
 wmlVarName = many namechars <* spaces
 
 namechars' = ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9'] ++ ['_']
 namechars = oneOf namechars' 
 
-lbracket = char '['
-rbracket = char ']'
-fslash = char '/'
+lb = char '['
+rb = char ']'
 
-plus = try(spaces *> char '+' <* spaces)
+plus = char '+'
 
 eol =   
         try (string "\n\r")
