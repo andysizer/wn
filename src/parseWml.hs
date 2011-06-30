@@ -34,15 +34,6 @@ data NodeItem = NAtt Attribute
               | NMNode MergeNode
         deriving (Eq, Show)
 
-topLevelNode = 
-    do spaces
-       lbracket
-       (NNode n) <- node
-       return n
-
-node = parseNode NNode Node
-
-mergeNode = parseNode NMNode MergeNode
 
 -- Main node parser
 -- need type decl to get it to type check
@@ -58,11 +49,26 @@ mkNode c1 c2 s b e
     | otherwise 
     = unexpected (": end tag '" ++ e ++ "' does not match '" ++ s ++ "'")
 
--- Next three control paring node bodies. NB no 'try's.
+-- 'constructors' for different node types
+node = parseNode NNode Node
+
+mergeNode = parseNode NMNode MergeNode
+
+-- Top Level Node parser 
+topLevelNode = 
+    do spaces
+       lbracket
+       (NNode n) <- node
+       return n
+
+-- parsing node bodies. NB no 'try's.
 nodeBody = 
         lbracket *> maybeEndBody
     <|> attributeThenNodeBody
 
+-- maybeEndBody
+-- we just hit [, so its either an end tag (NB don't consume the tag name)  
+-- or a node followed by...
 maybeEndBody =
         fslash *> (return [])
     <|> do n <- internalNode
@@ -70,6 +76,8 @@ maybeEndBody =
            r <- nodeBody
            return $ (n : r)
 
+-- attributeThenNodeBody
+-- we didn't see [, so must be an attribute followed by ...
 attributeThenNodeBody =
     do a <- attribute
        spaces
@@ -80,19 +88,25 @@ internalNode =
         char '+' *> mergeNode
     <|> node
 
-
+-- Attributes
 data Attribute = Attribute
     {
       aKey  :: String
-    , aValue :: String
+    , aValue :: AttributeValue
     }
         deriving (Eq, Show)
 
 data Mattribute = Mattribute
     {
       mKeys  :: [String]
-    , mValues :: [String]
+    , mValues :: [AttributeValue]
     }
+        deriving (Eq, Show)
+
+data AttributeValue = Translatable String
+                    | Substitution String
+                    | Formula String
+                    | String String
         deriving (Eq, Show)
 
 attribute = singleAttribute
@@ -114,16 +128,13 @@ singleAttValue =
     <|> defaultAttValue
     <?> "Invalid attribute value"
 
-translatableAttValue = 
-    do char '_'
-       v <- pString
-       return $ v
+translatableAttValue = char '"' *> (Translatable <$> pString)
 
-substitionAttValue = wmlVarName
+substitionAttValue = Substitution <$> wmlVarName
 
 quotedAttValue = 
-        char '$' *> formulaAttValue
-    <|> quotedAttValue'
+        char '$' *> (Formula <$> formulaAttValue) <* (spaces *> char '"')
+    <|> String <$> quotedAttValue'
 
 quotedAttValue' = 
     do s <- pString
@@ -144,9 +155,9 @@ pConcatString =
     <|> return []
             
 
-formulaAttValue = undefined
+formulaAttValue = between (char '(') (char ')') (many (noneOf ")"))
 
-defaultAttValue = anyChar `manyTill` eol
+defaultAttValue = String <$> anyChar `manyTill` eol
 
 tagName = manyTill namechars rbracket <* spaces
 attName = many namechars <* spaces
@@ -184,4 +195,9 @@ t13 = "[tag]\n     key=value\n   [xxx]\n     key1=value1\n[/xxx] \n [/tag]"
 t14= "[tag]\n     key=value\n   [tag1]\n     key1=value1\n[/tag] \n [/tag]"
 t15= "[+xxx]\n     key1=value1\n[/xxx]\n"
 t16= "[tag]\n     key=value\n   [+xxx]\n     key1=value1\n[/xxx] \n [/tag]"
-
+t17= "[tag]\n     key=\"value\"\n   [+xxx]\n     key1=value1\n[/xxx] \n [/tag]"
+t18= "[tag]\n     key=\"va\"\"lue\"\n   [+xxx]\n     key1=value1\n[/xxx] \n [/tag]"
+t19= "[tag]\n     key=\"va\" + \"lue\"\n   [+xxx]\n     key1=value1\n[/xxx] \n [/tag]"
+t20= "[tag]\n     key=_\"value\"\n   [+xxx]\n     key1=value1\n[/xxx] \n [/tag]"
+t21= "[tag]\n     key=$value\n   [+xxx]\n     key1=_\"value1\"\n[/xxx] \n [/tag]"
+t22= "[tag]\n     key=\"$(value)\"\n   [+xxx]\n     key1=_\"value1\"\n[/xxx] \n [/tag]"
