@@ -74,7 +74,7 @@ maybeEndBody =
     <|> do n <- internalNode
            spaces
            r <- nodeBody
-           return $ (n : r)
+           return (n : r)
 
 -- attributeThenNodeBody
 -- we didn't see [, so must be an attribute followed by ...
@@ -82,7 +82,7 @@ attributeThenNodeBody =
     do a <- attribute
        spaces
        b <- nodeBody
-       return $ (a : b)
+       return (a : b)
 
 internalNode =
         char '+' *> mergeNode
@@ -109,19 +109,41 @@ data AttributeValue = Translatable String
                     | String String
         deriving (Eq, Show)
 
-attribute = singleAttribute
+attribute = 
+    do spaces
+       key <- attName
+       keys <- maybeKeys
+       finishAtrribute key keys
 
-singleAttribute = lookAhead isSingleAttribute *> singleAttribute' 
+maybeKeys =
+        do char ','
+           spaces
+           key <- attName
+           keys <- maybeKeys
+           return (key : keys)
+    <|> return [] 
 
-isSingleAttribute = attName *> equals
+finishAtrribute key [] = 
+   do char '='
+      spaces
+      value <- attValue
+      return $ NAtt $ Attribute key value
+finishAtrribute key keys = 
+   do char '='
+      spaces
+      value <- attValue
+      values <- maybeValues
+      return $ NMatt $ Mattribute (key:keys) (value:values)
 
-singleAttribute' = 
-    do name <- attName
-       equals
-       value <- singleAttValue
-       return $ NAtt $ Attribute name value
+maybeValues = 
+        do char ','
+           spaces
+           value <- attValue
+           values <- maybeValues
+           return (value : values)
+    <|> return [] 
 
-singleAttValue = 
+attValue = 
         char '_' *> translatableAttValue
     <|> char '$' *> substitionAttValue
     <|> char '"' *> quotedAttValue
@@ -170,7 +192,6 @@ lbracket = char '['
 rbracket = char ']'
 fslash = char '/'
 
-equals = char '=' <* spaces
 plus = try(spaces *> char '+' <* spaces)
 
 eol =   
