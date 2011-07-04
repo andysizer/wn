@@ -8,6 +8,7 @@ module PreProcessWml
 
 import Data.List
 import Data.Map as M
+
 import Text.Parsec.Prim (unexpected)
 
 import Text.ParserCombinators.Parsec.Prim (getState, setState)
@@ -62,9 +63,9 @@ substitute =
        d <- return $ M.lookup s (defines st)
        substitute' d pat args
 
-substitute' Nothing pat args = undefined
+substitute' Nothing pat args = return "fucked"
 substitute' (Just d) pat args =
-    do args <- getArgs $ concat args
+    do args <- getArgs $ unwords args
        return $ substituteArgs d args
 
 getArgs args = 
@@ -82,7 +83,18 @@ parseArg =
 compoundArg = between (char '(') (char ')') (many (noneOf ")"))
 
 substituteArgs :: Define -> [String] -> String 
-substituteArgs d a = "da=dah"
+substituteArgs d a = r
+    where r = substituteArgs' (defArgs (sig d)) a (body d)
+
+substituteArgs' [] _ b = b
+substituteArgs' (x:xs) [] b = substituteArgs' xs [] (replace x [] b)
+substituteArgs' (x:xs) (y:ys) b = substituteArgs' xs ys (replace x y b)
+
+replace _ _ [] = []
+replace old new xs@(y:ys) =
+    case stripPrefix old xs of
+         Nothing -> y : replace old new ys
+         Just ys' -> new ++ replace old new ys'
 
 process =
         char '#' *> directive
@@ -144,7 +156,7 @@ pdefsig' (name:args) = return (name, pdefargs args)
 
 pdefargs [] = []
 pdefargs (('#':_): _) = []
-pdefargs (x:xs) = (x : pdefargs xs)
+pdefargs (x:xs) = (("{" ++ x ++ "}"): pdefargs xs)
 
 defineBody = many (noneOf "#") <* string "#enddef"
 
