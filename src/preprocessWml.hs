@@ -72,11 +72,13 @@ getArgs args =
        setState savedState
        return l
 
-parseArgs = many parseArg
+parseArgs = sepBy parseArg space
 
 parseArg = 
-        between (char '(') (char ')') (many (noneOf ")"))
-    <|> many (noneOf " \n\r\t")
+        spaces *> compoundArg 
+    <|> spaces *> many (noneOf " \n\r\t")
+
+compoundArg = between (char '(') (char ')') (many (noneOf ")"))
 
 substituteArgs :: Define -> [String] -> String 
 substituteArgs d a = undefined
