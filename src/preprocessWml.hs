@@ -7,6 +7,7 @@ module PreProcessWml
     where
 
 import Data.List
+import Data.Map as M
 import Text.Parsec.Prim (unexpected)
 
 import Text.ParserCombinators.Parsec.Prim (getState, setState)
@@ -14,10 +15,13 @@ import Text.ParserCombinators.Parsec.Prim (getState, setState)
 import ApplicativeParsec
 
 ----------------------------------------------------------------------------------
+
+type DefMap = M.Map String Define
+
 data PreprocessState = PreprocessState
     {
       state :: [String]
-    , defines :: [Define]
+    , defines :: DefMap
     }
         deriving (Eq, Show)
 
@@ -87,8 +91,12 @@ data Define = Define
         deriving (Eq, Show)
 
 updateDefines s b =
-    do s <-getState
-       setState s
+    do d <- return $ Define s b
+       n <- return $ defName s
+       st <-getState
+       nm <- return $ M.insert n d (defines st)
+       ns <- return $ PreprocessState (state st) nm
+       setState ns
 
 ifDirective = 
     do char 'i'
