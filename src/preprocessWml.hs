@@ -31,6 +31,8 @@ data PreprocessState = PreprocessState
     }
         deriving (Eq, Show)
 
+initState = PreprocessState [] M.empty
+
 preprocess:: CharParser PreprocessState String
 preprocess =
     do s <- skipping
@@ -54,8 +56,7 @@ preprocess' False =
            return $ [c]
 
 substitute =
-    do pat <- manyTill anyChar (char '}')
-       char '}'
+    do pat <- manyTill (noneOf "}") (char '}')
        st <- getState
        (s: args) <- return $ words pat
        d <- return $ M.lookup s (defines st)
@@ -81,7 +82,7 @@ parseArg =
 compoundArg = between (char '(') (char ')') (many (noneOf ")"))
 
 substituteArgs :: Define -> [String] -> String 
-substituteArgs d a = undefined
+substituteArgs d a = "da=dah"
 
 process =
         char '#' *> directive
