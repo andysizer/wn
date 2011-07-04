@@ -180,7 +180,7 @@ pConcatString =
 
 formulaAttValue = between (char '(') (char ')') (many (noneOf ")"))
 
--- NB should probably 'trim' this.
+-- TODO should we 'trim' this. What about the others?
 defaultAttValue = String <$> anyChar `manyTill` eol
 
 tagName = manyTill namechars rb <* spaces
