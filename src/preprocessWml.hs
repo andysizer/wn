@@ -18,25 +18,87 @@ import ApplicativeParsec
 
 type DefMap = M.Map String Define
 
+data DState = ProcessingIf
+           | SkippingIf
+           | ProcessingElse
+           | SkippingElse
+        deriving (Eq, Show)
+
 data PreprocessState = PreprocessState
     {
-      state :: [String]
+      state :: [DState]
     , defines :: DefMap
     }
         deriving (Eq, Show)
 
-
-preprocess :: CharParser PreprocessState Char
+preprocess:: CharParser PreprocessState String
 preprocess =
-        char '#' *> directive
-    <|> passThru
+    do s <- skipping
+       preprocess' s
 
-passThru = anyChar
+skipping =
+    do st <- getState
+       skipping' $ state st
+
+skipping' [] = return False
+skipping' (SkippingIf:_) = return True
+skipping' (SkippingElse:_) = return True
+skipping' _ = return False
+
+preprocess' True =
+    do c <- process
+       return [c]
+preprocess' False =
+        char '{' *> substitute
+    <|> do c <- process
+           return $ [c]
+
+substitute =
+    do pat <- manyTill anyChar (char '}')
+       char '}'
+       st <- getState
+       (s: args) <- return $ words pat
+       d <- return $ M.lookup s (defines st)
+       substitute' d pat args
+
+substitute' Nothing pat args = undefined
+substitute' (Just d) pat args =
+    do args <- getArgs $ concat args
+       return $ substituteArgs d args
+
+getArgs args = 
+    do savedState <- getState
+       (Right l) <- return $ parse parseArgs "" args
+       setState savedState
+       return l
+
+parseArgs = many parseArg
+
+parseArg = 
+        between (char '(') (char ')') (many (noneOf ")"))
+    <|> many (noneOf " \n\r\t")
+
+substituteArgs :: Define -> [String] -> String 
+substituteArgs d a = undefined
+
+process =
+        char '#' *> directive
+    <|> processChar
+
+processChar = 
+    do st <- getState
+       processChar' $ state st
+
+processChar' [] = anyChar
+processChar' (SkippingIf:_) = retnl
+processChar' (SkippingElse:_) = retnl
+processChar' _ = anyChar
 
 directive =
         comment
     <|> define
     <|> ifDirective
+    <|> elseEnd
     <|> undef
     <|> file
     <?> "unexpected preprocessor directive"
@@ -44,7 +106,7 @@ directive =
 comment =
     do char ' '
        restOfLine
-       return '\n'
+       retnl
 
 restOfLine = many (noneOf "\n\r") <* eol
 
@@ -57,7 +119,7 @@ define' =
     do s <- defineSig
        b <- defineBody
        updateDefines s b
-       return '\n'
+       retnl
        
 defineSig = 
     do l <- restOfLine
@@ -93,7 +155,7 @@ data Define = Define
 updateDefines s b =
     do d <- return $ Define s b
        n <- return $ defName s
-       st <-getState
+       st <- getState
        nm <- return $ M.insert n d (defines st)
        ns <- return $ PreprocessState (state st) nm
        setState ns
@@ -140,18 +202,62 @@ ifnver = if' "ver" verCondition (not . evalVerCondition)
 
 if' s c e =
     do string s
-       c <- c
-       r <- return (e c)
-       ifThen r
-       ifElse r
+       pred <- c
+       pushIfState(e pred)
+       retnl
 
-ifThen = undefined
-ifElse = undefined
+pushIfState True = pushDState ProcessingIf
+pushIfState False = pushDState SkippingIf
 
-undef = undefined
+pushDState s =
+    do st <- getState
+       ns <- return $ PreprocessState (s : state st) (defines st)
+       setState ns
+
+elseEnd =
+        char 'l' *> elseDir
+    <|> endif
+
+elseDir =
+    do string "se"
+       st <- getState
+       switchIfState (state st) (defines st)
+       restOfLine
+       retnl
+
+switchIfState (ProcessingIf : xs) d = return $ PreprocessState (SkippingElse : xs) d
+switchIfState (SkippingIf : xs) d = return $ PreprocessState (ProcessingElse : xs) d
+switchIfState _ _ = unexpected ": #else nested incorrectly"
+
+endif =
+    do string "ndif"
+       st <- getState
+       endif' (state st) (defines st)
+       restOfLine
+       retnl
+
+endif' (ProcessingIf : xs) d = return $ PreprocessState xs d
+endif' (SkippingIf : xs) d = return $ PreprocessState xs d
+endif' (ProcessingElse : xs) d = return $ PreprocessState xs d
+endif' (SkippingElse : xs) d = return $ PreprocessState xs d
+endif' _ _ = unexpected ": #endif nested incorrectly"
+
+undef =
+    do char 'u'
+       string "ndef"
+       l <- restOfLine
+       undef' $ words l
+       retnl
+
+undef' [] = unexpected ": #undef missing symbol"
+undef' (k: _) =
+    do st <- getState
+       nm <- return $ M.delete k (defines st)
+       return $ PreprocessState (state st) nm
 
 file = undefined
 
+retnl = return '\n'
 eol =   
         try (string "\n\r")
     <|> try (string "\r\n")
