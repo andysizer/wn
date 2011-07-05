@@ -12,50 +12,52 @@ import Data.Map as M
 import Text.Parsec.Prim (unexpected)
 
 import Text.ParserCombinators.Parsec.Prim (getState, setState)
-
 import ApplicativeParsec
 
 ----------------------------------------------------------------------------------
 
 type DefMap = M.Map String Define
 
-data DState = ProcessingIf
+data DState = Top
+           | ProcessingIf
            | SkippingIf
            | ProcessingElse
            | SkippingElse
+           | Defining
         deriving (Eq, Show)
 
 data PreprocessState = PreprocessState
     {
       state :: [DState]
     , defines :: DefMap
+    , pendingDefine :: DefSig
+    , pendingBody :: String
     }
         deriving (Eq, Show)
 
-initState = PreprocessState [] M.empty
+initState = PreprocessState [Top] M.empty (DefSig "" []) []
 
 preprocess:: CharParser PreprocessState String
 preprocess =
-    do s <- skipping
-       preprocess' s
-
-skipping =
     do st <- getState
-       skipping' $ state st
+       preprocess' $ state st
 
-skipping' [] = return False
-skipping' (SkippingIf:_) = return True
-skipping' (SkippingElse:_) = return True
-skipping' _ = return False
-
-preprocess' True =
-    do c <- process
+preprocess' s@(SkippingIf : _ ) =
+    do c <- process s
        return [c]
-preprocess' False =
+preprocess' s@(SkippingElse :_ ) =
+    do c <- process s
+       return [c]
+preprocess' s =
         char '{' *> substitute
-    <|> do c <- process
+    <|> do c <- process s
            return $ [c]
 
+----------------------------------------------------------------------
+-- Substitution - this can be macro expansion or file inclusion
+-- the text '{xxxx}' gets substituted.
+-- NB. We have already consumed the leading '{'
+----------------------------------------------------------------------
 substitute =
     do pat <- manyTill (noneOf "}") (char '}')
        st <- getState
@@ -63,7 +65,7 @@ substitute =
        d <- return $ M.lookup s (defines st)
        substitute' d pat args
 
-substitute' Nothing pat args = return "fucked"
+substitute' Nothing pat args = undefined
 substitute' (Just d) pat args =
     do args <- getArgs $ unwords args
        return $ substituteArgs d args
@@ -96,26 +98,30 @@ replace old new xs@(y:ys) =
          Nothing -> y : replace old new ys
          Just ys' -> new ++ replace old new ys'
 
-process =
-        char '#' *> directive
-    <|> processChar
+-----------------------------------------------
+-- non-substitution code 
+----------------------------------------------
 
-processChar = 
-    do st <- getState
-       processChar' $ state st
+process s =
+        char '#' *> directive s
+    <|> processChar s
 
-processChar' [] = anyChar
-processChar' (SkippingIf:_) = retnl
-processChar' (SkippingElse:_) = retnl
-processChar' _ = anyChar
+skip s = many (noneOf "#\n\r") *> process s
 
-directive =
+processChar s@(SkippingIf : _) =  skip s
+processChar s@(SkippingElse : _) = skip s
+processChar s@(Defining : _) =
+    do b <- many (noneOf "\n\r#")
+       pendBody b
+       char '#' *> directive s <|> retnl
+processChar _ = anyChar
+
+directive s =
         comment
-    <|> define
-    <|> ifDirective
-    <|> elseEnd
+    <|> define s
+    <|> ifDirective s
+    <|> elseEnd s
     <|> undef
-    <|> file
     <?> "unexpected preprocessor directive"
 
 comment =
@@ -125,17 +131,15 @@ comment =
 
 restOfLine = many (noneOf "\n\r") <* eol
 
-define = 
+define s@(SkippingIf : _) =  skip s
+define s@(SkippingElse  :_) =  skip s
+define s  = 
     do char 'd'
        string "efine"
-       define'
-
-define' =
-    do s <- defineSig
-       b <- defineBody
-       updateDefines s b
+       s <- defineSig
+       pendDefine s
        retnl
-       
+
 defineSig = 
     do l <- restOfLine
        (name, args) <- pdefsig l
@@ -158,7 +162,13 @@ pdefargs [] = []
 pdefargs (('#':_): _) = []
 pdefargs (x:xs) = (("{" ++ x ++ "}"): pdefargs xs)
 
-defineBody = many (noneOf "#") <* string "#enddef"
+pendDefine s =
+    do st <- getState
+       setState $ PreprocessState (Defining : (state st)) (defines st) s []
+
+pendBody b =
+    do st <- getState
+       setState $ PreprocessState (state st) (defines st) (pendingDefine st) (pendingBody st ++ b ++ "\n")
 
 data Define = Define
     {
@@ -172,15 +182,18 @@ updateDefines s b =
        n <- return $ defName s
        st <- getState
        nm <- return $ M.insert n d (defines st)
-       ns <- return $ PreprocessState (state st) nm
+       ns <- return $ PreprocessState (state st) nm (pendingDefine st) (pendingBody st)
        setState ns
 
-ifDirective = 
+ifDirective s = 
     do char 'i'
        char 'f'
-       ifDirective'
+       ifDirective' s
 
-ifDirective' =
+ifDirective' s@(SkippingIf : _) =  pushDState SkippingIf *> skip s
+ifDirective' s@(SkippingElse  :_) =  pushDState SkippingIf *> skip s
+ifDirective' s@(Defining  :_) =  unexpected ": #if not supported inside #define"
+ifDirective' s =
         ifdef
     <|> ifhave
     <|> ifver
@@ -226,36 +239,47 @@ pushIfState False = pushDState SkippingIf
 
 pushDState s =
     do st <- getState
-       ns <- return $ PreprocessState (s : state st) (defines st)
-       setState ns
+       setState $ PreprocessState (s : state st) (defines st) (pendingDefine st) (pendingBody st)
 
-elseEnd =
-        char 'l' *> elseDir
-    <|> endif
+elseEnd s =
+        char 'l' *> elseDir s
+    <|> string "nd" *> end s
 
-elseDir =
+elseDir s =
     do string "se"
        st <- getState
-       switchIfState (state st) (defines st)
+       switchIfState s st
        restOfLine
        retnl
 
-switchIfState (ProcessingIf : xs) d = return $ PreprocessState (SkippingElse : xs) d
-switchIfState (SkippingIf : xs) d = return $ PreprocessState (ProcessingElse : xs) d
+switchIfState (ProcessingIf : xs) st = setPState (SkippingElse : xs) st
+switchIfState (SkippingIf : (SkippingElse : xs)) st = setPState (SkippingElse : (SkippingElse : xs)) st
+switchIfState (SkippingIf : (SkippingIf : xs)) st = setPState (SkippingElse : (SkippingIf : xs)) st
+switchIfState (SkippingIf : xs) st = setPState (ProcessingElse : xs) st
 switchIfState _ _ = unexpected ": #else nested incorrectly"
 
-endif =
-    do string "ndif"
+setPState s st = setState $ PreprocessState s (defines st) (pendingDefine st) (pendingBody st)
+
+end s =
+        endif s
+    <|> enddef s
+
+endif s =
+    do string "if"
        st <- getState
-       endif' (state st) (defines st)
+       endif' s st
        restOfLine
        retnl
 
-endif' (ProcessingIf : xs) d = return $ PreprocessState xs d
-endif' (SkippingIf : xs) d = return $ PreprocessState xs d
-endif' (ProcessingElse : xs) d = return $ PreprocessState xs d
-endif' (SkippingElse : xs) d = return $ PreprocessState xs d
+endif' (ProcessingIf : _) st = popState st
+endif' (SkippingIf : _) st = popState st
+endif' (ProcessingElse : _) st = popState st
+endif' (SkippingElse : _) st = popState st
 endif' _ _ = unexpected ": #endif nested incorrectly"
+
+popState st = return $ PreprocessState (tail $ state st) (defines st) (pendingDefine st) (pendingBody st)
+
+enddef s = xxxxx
 
 undef =
     do char 'u'
@@ -270,9 +294,8 @@ undef' (k: _) =
        nm <- return $ M.delete k (defines st)
        return $ PreprocessState (state st) nm
 
-file = undefined
-
 retnl = return '\n'
+
 eol =   
         try (string "\n\r")
     <|> try (string "\r\n")
