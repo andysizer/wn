@@ -179,7 +179,7 @@ comment =
        restOfLine
        retnl
 
-restOfLine = manyTill (noneOf "\n\r") (eof <|> eol)
+restOfLine = many (noneOf "\n\r") <* eol
 
 define s@(SkippingIf : _) =  skip s
 define s@(SkippingElse  :_) =  skip s
