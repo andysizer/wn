@@ -15,10 +15,36 @@ import Text.ParserCombinators.Parsec.Prim (getState, setState)
 import ApplicativeParsec
 
 ----------------------------------------------------------------------------------
+-- PreprocessState
+-- Holds the state of the preprocessor
+-- state :       
+--   describes what the preprocess is doing e.g. processing #if or #define.See PState.
+--   It is a stack, implemented as list, that reflects conditional nesting.
+--   Many of the parsing functions match against the top of the stack
+--   NB it is never empty (see initState) so 'head' and 'tail' are always safe.
+-- defines:
+--   a map from name to a Define structure that describes a textual substitution
+-- pendingDefine:
+--   Only valid in Defining State. Contains the 'signature' of the #define being
+--   processed.
+-- pendingBody: 
+--   Only valid in Defining State. Accumulates the body of the #define being
+--   processed.
 
-type DefMap = M.Map String Define
+data PreprocessState = PreprocessState
+    {
+      state :: [PState]
+    , defines :: DefMap
+    , pendingDefine :: DefSig
+    , pendingBody :: String
+    }
+        deriving (Eq, Show)
 
-data DState = Top
+----------------------------------------------------------------------------------
+-- PState
+-- An enumeration of the possible states of the preprocessor.
+
+data PState = Top
            | ProcessingIf
            | SkippingIf
            | ProcessingElse
@@ -26,21 +52,44 @@ data DState = Top
            | Defining
         deriving (Eq, Show)
 
-data PreprocessState = PreprocessState
+
+type DefMap = M.Map String Define
+
+data Define = Define
     {
-      state :: [DState]
-    , defines :: DefMap
-    , pendingDefine :: DefSig
-    , pendingBody :: String
+      sig :: DefSig
+    , body :: String
+    }
+        deriving (Eq, Show)
+
+data DefSig = DefSig
+    {
+      defName :: String
+    , defArgs :: [String]
     }
         deriving (Eq, Show)
 
 initState = PreprocessState [Top] M.empty (DefSig "" []) []
 
-preprocess:: CharParser PreprocessState String
+-----------------------------------------------------------------------------------
+-- preprocess consumes one of more source chars from the input and returns a string
+-- The string can contain
+-- 1. The character consumed
+-- 2. A new line i.e. when skipping a failed If branch
+-- 3. The result of a substition.
+-- It is assumed preprocess will called repeatedly on given input and the results
+-- concat'ed to form the result of the preprocess all the input.
+
+preprocessWml :: CharParser PreprocessState [String]
+preprocessWml = 
+    do setState initState
+       many preprocess
+
+preprocess :: CharParser PreprocessState String
 preprocess =
-    do st <- getState
-       preprocess' $ state st
+        eof *> return ""
+    <|> do st <- getState
+           preprocess' $ state st
 
 preprocess' s@(SkippingIf : _ ) =
     do c <- process s
@@ -57,6 +106,7 @@ preprocess' s =
 -- Substitution - this can be macro expansion or file inclusion
 -- the text '{xxxx}' gets substituted.
 -- NB. We have already consumed the leading '{'
+-- We don't deal with nested substitions ....
 ----------------------------------------------------------------------
 substitute =
     do pat <- manyTill (noneOf "}") (char '}')
@@ -113,7 +163,7 @@ processChar s@(SkippingElse : _) = skip s
 processChar s@(Defining : _) =
     do b <- many (noneOf "\n\r#")
        pendBody b
-       char '#' *> directive s <|> retnl
+       (char '#' *> directive s) <|> (restOfLine *> retnl)
 processChar _ = anyChar
 
 directive s =
@@ -122,14 +172,14 @@ directive s =
     <|> ifDirective s
     <|> elseEnd s
     <|> undef
-    <?> "unexpected preprocessor directive"
+    <?> "preprocessor directive"
 
 comment =
     do char ' '
        restOfLine
        retnl
 
-restOfLine = many (noneOf "\n\r") <* eol
+restOfLine = manyTill (noneOf "\n\r") (eof <|> eol)
 
 define s@(SkippingIf : _) =  skip s
 define s@(SkippingElse  :_) =  skip s
@@ -144,13 +194,6 @@ defineSig =
     do l <- restOfLine
        (name, args) <- pdefsig l
        return (DefSig name args)
-
-data DefSig = DefSig
-    {
-      defName :: String
-    , defArgs :: [String]
-    }
-        deriving (Eq, Show)
 
 pdefsig l = pdefsig' $ words l
 
@@ -170,18 +213,9 @@ pendBody b =
     do st <- getState
        setState $ PreprocessState (state st) (defines st) (pendingDefine st) (pendingBody st ++ b ++ "\n")
 
-data Define = Define
-    {
-      sig :: DefSig
-    , body :: String
-    }
-        deriving (Eq, Show)
-
-updateDefines s b =
-    do d <- return $ Define s b
-       n <- return $ defName s
-       st <- getState
-       nm <- return $ M.insert n d (defines st)
+updateDefines st =
+    do s <- return $ pendingDefine st
+       nm <- return $ M.insert (defName s) (Define s (pendingBody st)) (defines st)
        ns <- return $ PreprocessState (state st) nm (pendingDefine st) (pendingBody st)
        setState ns
 
@@ -190,58 +224,52 @@ ifDirective s =
        char 'f'
        ifDirective' s
 
-ifDirective' s@(SkippingIf : _) =  pushDState SkippingIf *> skip s
-ifDirective' s@(SkippingElse  :_) =  pushDState SkippingIf *> skip s
+ifDirective' s@(SkippingIf : _) =  pushPState SkippingIf  s *> skip s
+ifDirective' s@(SkippingElse  :_) =  pushPState SkippingIf s *> skip s
 ifDirective' s@(Defining  :_) =  unexpected ": #if not supported inside #define"
 ifDirective' s =
-        ifdef
-    <|> ifhave
-    <|> ifver
-    <|> char 'n' *> ifn
+        ifdef s
+    <|> ifhave s
+    <|> ifver s
+    <|> char 'n' *> ifn s
 
-ifdef = if' "def" defCondition evalDefCondition
+ifdef s = if' "def" defCondition evalDefCondition s
 
 defCondition = undefined
 
 evalDefCondition = undefined
 
-ifhave = if' "def" haveCondition evalHaveCondition
+ifhave s = if' "def" haveCondition evalHaveCondition s
 
 haveCondition = undefined
 
 evalHaveCondition = undefined
 
-ifver = if' "ver" verCondition evalVerCondition
+ifver s = if' "ver" verCondition evalVerCondition s
 
 verCondition = undefined
 
 evalVerCondition = undefined
 
-ifn =
-        ifndef
-    <|> ifnhave
-    <|> ifnver
+ifn s =
+        ifndef s
+    <|> ifnhave s
+    <|> ifnver s
 
-ifndef = if' "def" defCondition (not . evalDefCondition)
+ifndef s = if' "def" defCondition (not . evalDefCondition) s
 
-ifnhave = if' "def" haveCondition (not . evalHaveCondition)
+ifnhave s = if' "def" haveCondition (not . evalHaveCondition) s
 
-ifnver = if' "ver" verCondition (not . evalVerCondition)
+ifnver s = if' "ver" verCondition (not . evalVerCondition) s
 
-if' s c e =
-    do string s
+if' r c e s =
+    do string r
        pred <- c
-       pushIfState(e pred)
+       pushIfState(e pred) s
        retnl
 
-pushIfState True = pushDState ProcessingIf
-pushIfState False = pushDState SkippingIf
-
-pushDState s =
-    do st <- getState
-       setState $ PreprocessState (s : state st) (defines st) (pendingDefine st) (pendingBody st)
-
-elseEnd s =
+elseEnd s = char 'e' *> elseEnd' s
+elseEnd' s =
         char 'l' *> elseDir s
     <|> string "nd" *> end s
 
@@ -257,6 +285,15 @@ switchIfState (SkippingIf : (SkippingElse : xs)) st = setPState (SkippingElse : 
 switchIfState (SkippingIf : (SkippingIf : xs)) st = setPState (SkippingElse : (SkippingIf : xs)) st
 switchIfState (SkippingIf : xs) st = setPState (ProcessingElse : xs) st
 switchIfState _ _ = unexpected ": #else nested incorrectly"
+
+pushIfState True s = pushPState ProcessingIf s
+pushIfState False s = pushPState SkippingIf s
+
+pushPState n s =
+    do st <- getState
+       setPState (n : s) st
+
+popState st = setPState (tail $ state st) st
 
 setPState s st = setState $ PreprocessState s (defines st) (pendingDefine st) (pendingBody st)
 
@@ -277,9 +314,19 @@ endif' (ProcessingElse : _) st = popState st
 endif' (SkippingElse : _) st = popState st
 endif' _ _ = unexpected ": #endif nested incorrectly"
 
-popState st = return $ PreprocessState (tail $ state st) (defines st) (pendingDefine st) (pendingBody st)
+enddef s = 
+    do string "def"
+       st <- getState
+       enddef' s st
+       restOfLine
+       retnl
 
-enddef s = xxxxx
+enddef' (SkippingIf : _) st = popState st
+enddef' (SkippingElse : _) st = popState st
+enddef' (Defining : _) st = 
+    do popState st
+       updateDefines st
+enddef' _ _ = unexpected ": #enddef"
 
 undef =
     do char 'u'
@@ -301,3 +348,12 @@ eol =
     <|> try (string "\r\n")
     <|> string "\n"
     <|> string "\r"
+
+tn = 
+   [
+     "xxx" -- pass
+   , "#" -- fail
+   , "# gsgsg"
+   , "zzz# sdsd"
+   , "#define foo x y # sdsd\nv1={x}\nv2={y}\n#enddef\n{foo 1 2}" -- pass
+   ]
