@@ -80,11 +80,17 @@ initState = PreprocessState [Top] M.empty (DefSig "" []) []
 -- It is assumed preprocess will called repeatedly on given input and the results
 -- concat'ed to form the result of the preprocess all the input.
 
-preprocessWml :: CharParser PreprocessState [String]
+preprocessWml :: CharParser PreprocessState String
 preprocessWml = 
-    do setState initState
-       many preprocess
+    do s <- preprocess
+       preprocessWml' s
 
+preprocessWml' :: String -> CharParser PreprocessState String
+preprocessWml' "" = return ""
+preprocessWml' c =
+    do cs <- preprocessWml
+       return $ c ++ cs
+       
 preprocess :: CharParser PreprocessState String
 preprocess =
         eof *> return ""
@@ -102,6 +108,11 @@ preprocess' s =
     <|> do c <- process s
            return $ [c]
 
+check :: CharParser PreprocessState String
+check =
+    do s <- getState
+       unexpected $ "current state " ++ (show $ head $ state s)
+       return ""
 ----------------------------------------------------------------------
 -- Substitution - this can be macro expansion or file inclusion
 -- the text '{xxxx}' gets substituted.
@@ -179,7 +190,9 @@ comment =
        restOfLine
        retnl
 
-restOfLine = many (noneOf "\n\r") <* eol
+lineEnd = eol <|> (eof *> return "\n")
+
+restOfLine = manyTill (noneOf "\n\r") lineEnd
 
 define s@(SkippingIf : _) =  skip s
 define s@(SkippingElse  :_) =  skip s
@@ -213,8 +226,9 @@ pendBody b =
     do st <- getState
        setState $ PreprocessState (state st) (defines st) (pendingDefine st) (pendingBody st ++ b ++ "\n")
 
-updateDefines st =
-    do s <- return $ pendingDefine st
+updateDefines =
+    do st <- getState
+       s <- return $ pendingDefine st
        nm <- return $ M.insert (defName s) (Define s (pendingBody st)) (defines st)
        ns <- return $ PreprocessState (state st) nm (pendingDefine st) (pendingBody st)
        setState ns
@@ -293,7 +307,9 @@ pushPState n s =
     do st <- getState
        setPState (n : s) st
 
-popState st = setPState (tail $ state st) st
+popState = 
+    do st <- getState
+       setPState (tail $ state st) st
 
 setPState s st = setState $ PreprocessState s (defines st) (pendingDefine st) (pendingBody st)
 
@@ -303,30 +319,30 @@ end s =
 
 endif s =
     do string "if"
-       st <- getState
-       endif' s st
+       endif' s
        restOfLine
        retnl
 
-endif' (ProcessingIf : _) st = popState st
-endif' (SkippingIf : _) st = popState st
-endif' (ProcessingElse : _) st = popState st
-endif' (SkippingElse : _) st = popState st
-endif' _ _ = unexpected ": #endif nested incorrectly"
+endif' (ProcessingIf : _) = popState
+endif' (SkippingIf : _) = popState
+endif' (ProcessingElse : _) = popState
+endif' (SkippingElse : _) = popState
+endif' _ = unexpected ": #endif nested incorrectly"
 
 enddef s = 
     do string "def"
        st <- getState
-       enddef' s st
+       enddef' s
        restOfLine
        retnl
 
-enddef' (SkippingIf : _) st = popState st
-enddef' (SkippingElse : _) st = popState st
-enddef' (Defining : _) st = 
-    do popState st
-       updateDefines st
-enddef' _ _ = unexpected ": #enddef"
+enddef' (SkippingIf : _) = popState
+enddef' (SkippingElse : _) = popState
+enddef' (Defining : _) = 
+    do updateDefines
+       popState
+
+enddef' _ = unexpected ": #enddef"
 
 undef =
     do char 'u'
