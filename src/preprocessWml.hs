@@ -1,8 +1,10 @@
 -- file: preprocessWml.hs
 
 
-module PreProcessWml
+module PreprocessWml
 (
+  preprocessWml
+, initState
 ) 
     where
 
@@ -248,18 +250,27 @@ ifDirective' s =
     <|> char 'n' *> ifn s
 
 ifdef s = if' "def" defCondition evalDefCondition s
+ifndef s = ifn' "def" defCondition evalDefCondition s
 
-defCondition = undefined
+defCondition = symbol <* restOfLine
 
-evalDefCondition = undefined
+symbol = spaces *> many (noneOf " \n\r\t")
+
+evalDefCondition s = 
+    do st <-getState
+       case M.member s (defines st) of
+           True -> return True
+           _ -> unexpected "symbol not found"
 
 ifhave s = if' "def" haveCondition evalHaveCondition s
+ifnhave s = ifn' "def" haveCondition evalHaveCondition s
 
 haveCondition = undefined
 
 evalHaveCondition = undefined
 
 ifver s = if' "ver" verCondition evalVerCondition s
+ifnver s = ifn' "ver" verCondition evalVerCondition s
 
 verCondition = undefined
 
@@ -270,16 +281,18 @@ ifn s =
     <|> ifnhave s
     <|> ifnver s
 
-ifndef s = if' "def" defCondition (not . evalDefCondition) s
-
-ifnhave s = if' "def" haveCondition (not . evalHaveCondition) s
-
-ifnver s = if' "ver" verCondition (not . evalVerCondition) s
-
 if' r c e s =
     do string r
        pred <- c
-       pushIfState(e pred) s
+       b <- e pred
+       pushIfState b s
+       retnl
+
+ifn' r c e s =
+    do string r
+       pred <- c
+       b <- e pred
+       pushIfState (not b) s
        retnl
 
 elseEnd s = char 'e' *> elseEnd' s
@@ -373,3 +386,5 @@ tn =
    , "zzz# sdsd"
    , "#define foo x y # sdsd\nv1={x}\nv2={y}\n#enddef\n{foo 1 2}" -- pass
    ]
+
+main = runParser preprocessWml initState "" "#define foo \n#enddef\n#ifndef foo\nbar\n#endif
