@@ -54,7 +54,33 @@ data PState = Top
            | Defining
         deriving (Eq, Show)
 
+----------------------------------------------------------------------------------
+-- utility functions for manipulation PState
 
+setPState s st = setState $ PreprocessState s (defines st) (pendingDefine st) (pendingBody st)
+
+popState = 
+    do st <- getState
+       setPState (tail $ state st) st
+
+pushPState n s =
+    do st <- getState
+       setPState (n : s) st
+
+-- next two used by #if directives
+
+pushIfState True s = pushPState ProcessingIf s
+pushIfState False s = pushPState SkippingIf s
+
+switchIfState (ProcessingIf : xs) st = setPState (SkippingElse : xs) st
+switchIfState (SkippingIf : (SkippingElse : xs)) st = setPState (SkippingElse : (SkippingElse : xs)) st
+switchIfState (SkippingIf : (SkippingIf : xs)) st = setPState (SkippingElse : (SkippingIf : xs)) st
+switchIfState (SkippingIf : xs) st = setPState (ProcessingElse : xs) st
+switchIfState _ _ = unexpected ": #else nested incorrectly"
+
+----------------------------------------------------------------------------------
+-- Types for dealing with #define
+----------------------------------------------------------------------------------
 type DefMap = M.Map String Define
 
 data Define = Define
@@ -71,6 +97,8 @@ data DefSig = DefSig
     }
         deriving (Eq, Show)
 
+-----------------------------------------------------------
+-- Initial Preprocessor State
 initState = PreprocessState [Top] M.empty (DefSig "" []) []
 
 -----------------------------------------------------------------------------------
@@ -307,24 +335,6 @@ elseDir s =
        restOfLine
        retnl
 
-switchIfState (ProcessingIf : xs) st = setPState (SkippingElse : xs) st
-switchIfState (SkippingIf : (SkippingElse : xs)) st = setPState (SkippingElse : (SkippingElse : xs)) st
-switchIfState (SkippingIf : (SkippingIf : xs)) st = setPState (SkippingElse : (SkippingIf : xs)) st
-switchIfState (SkippingIf : xs) st = setPState (ProcessingElse : xs) st
-switchIfState _ _ = unexpected ": #else nested incorrectly"
-
-pushIfState True s = pushPState ProcessingIf s
-pushIfState False s = pushPState SkippingIf s
-
-pushPState n s =
-    do st <- getState
-       setPState (n : s) st
-
-popState = 
-    do st <- getState
-       setPState (tail $ state st) st
-
-setPState s st = setState $ PreprocessState s (defines st) (pendingDefine st) (pendingBody st)
 
 end s =
         endif s
