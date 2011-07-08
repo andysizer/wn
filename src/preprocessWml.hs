@@ -16,6 +16,7 @@ import Text.Parsec.Prim (unexpected)
 import Text.ParserCombinators.Parsec.Prim (getState, setState)
 import ApplicativeParsec
 
+
 ----------------------------------------------------------------------------------
 -- PreprocessState
 -- Holds the state of the preprocessor
@@ -154,12 +155,39 @@ substitute =
        st <- getState
        (s: args) <- return $ words pat
        d <- return $ M.lookup s (defines st)
-       substitute' d pat args
+       n <- substitute' d pat args
+       return $ case runParser preprocessWml st "" n of
+                    Right s -> s
+                    Left e -> fail $ show e
 
-substitute' Nothing pat args = undefined
+substitute' Nothing pat _ = 
+    do input <- getFileContents pat
+       n <- (include pat input)
+       l <- getLineDir
+       return $ n  ++ l
 substitute' (Just d) pat args =
     do args <- getArgs $ unwords args
        return $ substituteArgs d args
+
+getFileContents f = readFile f
+
+include n c =
+    do oldPos <- getPosition
+       oldInput <- getInput
+       setPosition $ newPosition n oldPos
+       setInput c
+       r <- preprocessWml
+       setInput oldInput
+       setPosition oldPos
+       putStr r
+
+newPosition n p =
+    setSourceName (setSourceLine (setSourceColumn p 1) 1) n
+
+getLineDir = 
+    do p <- getPosition
+       putStr$ "#line: \"" ++ (sourceName p) ++ "\" " ++ (show $ sourceLine p) ++ " " ++ (show $ sourceColumn p)
+
 
 getArgs args = 
     do savedState <- getState
@@ -197,7 +225,12 @@ process s =
         char '#' *> directive s
     <|> processChar s
 
-skip s = many (noneOf "#\n\r") *> process s
+skip s =
+        (char '#' *> directive s)
+    <|> eol *> retnl
+    <|> eof *> retnl
+    <|> anyChar *> skip s
+    <?> "fell off end"
 
 processChar s@(SkippingIf : _) =  skip s
 processChar s@(SkippingElse : _) = skip s
@@ -208,16 +241,15 @@ processChar s@(Defining : _) =
 processChar _ = anyChar
 
 directive s =
-        comment
-    <|> define s
-    <|> ifDirective s
-    <|> elseEnd s
-    <|> undef
+        char ' ' *> comment
+    <|> char 'd' *> define s
+    <|> char 'i' *> ifDirective s
+    <|> char 'e' *> elseEnd s
+    <|> char 'u' *> undef s 
     <?> "preprocessor directive"
 
 comment =
-    do char ' '
-       restOfLine
+    do restOfLine
        retnl
 
 lineEnd = eol <|> (eof *> return "\n")
@@ -227,8 +259,7 @@ restOfLine = manyTill (noneOf "\n\r") lineEnd
 define s@(SkippingIf : _) =  skip s
 define s@(SkippingElse  :_) =  skip s
 define s  = 
-    do char 'd'
-       string "efine"
+    do string "efine"
        s <- defineSig
        pendDefine s
        retnl
@@ -254,7 +285,10 @@ pendDefine s =
 
 pendBody b =
     do st <- getState
-       setState $ PreprocessState (state st) (defines st) (pendingDefine st) (pendingBody st ++ b ++ "\n")
+       setState $ PreprocessState (state st) 
+                                  (defines st) 
+                                  (pendingDefine st) 
+                                  (pendingBody st ++ b ++ "\n")
 
 updateDefines =
     do st <- getState
@@ -264,21 +298,20 @@ updateDefines =
        setState ns
 
 ifDirective s = 
-    do char 'i'
-       char 'f'
+    do char 'f'
        ifDirective' s
 
 ifDirective' s@(SkippingIf : _) =  pushPState SkippingIf  s *> skip s
 ifDirective' s@(SkippingElse  :_) =  pushPState SkippingIf s *> skip s
 ifDirective' s@(Defining  :_) =  unexpected ": #if not supported inside #define"
 ifDirective' s =
-        ifdef s
-    <|> ifhave s
-    <|> ifver s
+        char 'd' *> ifdef s
+    <|> char 'h' *> ifhave s
+    <|> char 'v' *> ifver s
     <|> char 'n' *> ifn s
 
-ifdef s = if' "def" defCondition evalDefCondition s
-ifndef s = ifn' "def" defCondition evalDefCondition s
+ifdef s = if' "ef" defCondition evalDefCondition s
+ifndef s = ifn' "ef" defCondition evalDefCondition s
 
 defCondition = symbol <* restOfLine
 
@@ -288,26 +321,26 @@ evalDefCondition s =
     do st <-getState
        case M.member s (defines st) of
            True -> return True
-           _ -> unexpected "symbol not found"
+           _ -> return False
 
-ifhave s = if' "def" haveCondition evalHaveCondition s
-ifnhave s = ifn' "def" haveCondition evalHaveCondition s
+ifhave s = if' "ave" haveCondition evalHaveCondition s
+ifnhave s = ifn' "ave" haveCondition evalHaveCondition s
 
 haveCondition = undefined
 
 evalHaveCondition = undefined
 
-ifver s = if' "ver" verCondition evalVerCondition s
-ifnver s = ifn' "ver" verCondition evalVerCondition s
+ifver s = if' "er" verCondition evalVerCondition s
+ifnver s = ifn' "er" verCondition evalVerCondition s
 
 verCondition = undefined
 
 evalVerCondition = undefined
 
 ifn s =
-        ifndef s
-    <|> ifnhave s
-    <|> ifnver s
+        char 'd' *> ifndef s
+    <|> char 'h' *> ifnhave s
+    <|> char 'v' *> ifnver s
 
 if' r c e s =
     do string r
@@ -323,8 +356,7 @@ ifn' r c e s =
        pushIfState (not b) s
        retnl
 
-elseEnd s = char 'e' *> elseEnd' s
-elseEnd' s =
+elseEnd s =
         char 'l' *> elseDir s
     <|> string "nd" *> end s
 
@@ -337,13 +369,12 @@ elseDir s =
 
 
 end s =
-        endif s
+        char 'i' *> endif s
     <|> enddef s
 
 endif s =
-    do string "if"
+    do restOfLine
        endif' s
-       restOfLine
        retnl
 
 endif' (ProcessingIf : _) = popState
@@ -367,9 +398,10 @@ enddef' (Defining : _) =
 
 enddef' _ = unexpected ": #enddef"
 
-undef =
-    do char 'u'
-       string "ndef"
+undef (SkippingIf : _) = restOfLine *> retnl
+undef (SkippingElse : _) = restOfLine *> retnl
+undef s =
+    do string "ndef"
        l <- restOfLine
        undef' $ words l
        retnl
@@ -395,6 +427,10 @@ tn =
    , "# gsgsg"
    , "zzz# sdsd"
    , "#define foo x y # sdsd\nv1={x}\nv2={y}\n#enddef\n{foo 1 2}" -- pass
+   , "#define d1\n#enddef\n#define d2\n#enddef\n#ifdef d1\nxxx\n#ifdef d2\nyyy\n#else\nbbb\n#endif\n#else\naaa\n#endif\n"
+   , "#define x a b c\n#ifndef d\nx1 = {a}\n#else\nx2={b}\n#endif\n#enddef\n"
+   , "#define foo x y\n  bar {x}+1 {y} {x}\n#enddef\n#define bar x y z\n  x={x}\n  y={y}\n  z={z}\n#enddef\n{foo 1 3}\n"
    ]
 
-main = runParser preprocessWml initState "" "#define foo \n#enddef\n#ifndef foo\nbar\n#endif
+test = runParser preprocessWml initState "" 
+
