@@ -1,10 +1,9 @@
 -- file: preprocessWml.hs
 
 
-module PreprocessWml
+module PreProcessWml
 (
-  preprocessWml
-, initState
+  preProcessWmlFile
 ) 
     where
 
@@ -103,6 +102,20 @@ data DefSig = DefSig
 initState = PreprocessState [Top] M.empty (DefSig "" []) []
 
 -----------------------------------------------------------------------------------
+
+preProcessWmlFile f s = 
+    do 
+       case preProcessWmlFile' initState f s of 
+           Right (r, _) -> return r
+           Left e -> error $ show e
+
+preProcessWmlFile' st n s = runParser preprocessWmlFile'' st n s
+
+preprocessWmlFile'' = 
+    do r <- preprocessWml
+       st <- getState
+       return (r, st)
+    
 -- preprocess consumes one of more source chars from the input and returns a string
 -- The string can contain
 -- 1. The character consumed
@@ -111,18 +124,18 @@ initState = PreprocessState [Top] M.empty (DefSig "" []) []
 -- It is assumed preprocess will called repeatedly on given input and the results
 -- concat'ed to form the result of the preprocess all the input.
 
-preprocessWml :: CharParser PreprocessState String
+--preprocessWml :: CharParser PreprocessState String
 preprocessWml = 
     do s <- preprocess
        preprocessWml' s
 
-preprocessWml' :: String -> CharParser PreprocessState String
+--preprocessWml' :: String -> CharParser PreprocessState String
 preprocessWml' "" = return ""
 preprocessWml' c =
     do cs <- preprocessWml
        return $ c ++ cs
        
-preprocess :: CharParser PreprocessState String
+--preprocess :: CharParser PreprocessState String
 preprocess =
         eof *> return ""
     <|> do st <- getState
@@ -150,6 +163,7 @@ check =
 -- NB. We have already consumed the leading '{'
 -- We don't deal with nested substitions ....
 ----------------------------------------------------------------------
+substitute :: CharParser PreprocessState String
 substitute =
     do pat <- manyTill (noneOf "}") (char '}')
        st <- getState
@@ -161,13 +175,17 @@ substitute =
                     Left e -> fail $ show e
 
 substitute' Nothing pat _ = 
-    do input <- getFileContents pat
-       n <- (include pat input)
-       l <- getLineDir
-       return $ n  ++ l
+    do s <- getFileContents pat
+       st <- getState
+       (r, nst) <- preProcessWmlFile st pat s
+       setState nst
+       -- l <- getLineDir
+       return $ r  -- ++ l
+
 substitute' (Just d) pat args =
     do args <- getArgs $ unwords args
        return $ substituteArgs d args
+
 
 getFileContents f = readFile f
 
@@ -187,7 +205,7 @@ newPosition n p =
 getLineDir = 
     do p <- getPosition
        putStr$ "#line: \"" ++ (sourceName p) ++ "\" " ++ (show $ sourceLine p) ++ " " ++ (show $ sourceColumn p)
-
+--}
 
 getArgs args = 
     do savedState <- getState
