@@ -124,9 +124,17 @@ preProcessWmlFile' st n s = do
         Left e -> error $ show e
 
 preprocessWmlFile'' = 
-    do r <- preprocessWml
+    do l <- lineInfo
+       r <- preprocessWml
        st <- getState
-       return (st, r)
+       return (st, l ++ r)
+
+lineInfo = 
+    do pos <- getPosition
+       let n = sourceName pos
+       let l = show $ sourceLine pos
+       let c = show $ sourceColumn pos
+       return $ "\n#line \"" ++ n ++ "\" " ++ l ++ " " ++ c ++ "\n"
 
 driver :: PreProcessorState -> IO (String)
 driver (PreProcessorState [] [] _ _ _ _) = return ""
@@ -466,6 +474,7 @@ tn =
    , "#define d1\n#enddef\n#define d2\n#enddef\n#ifdef d1\nxxx\n#ifdef d2\nyyy\n#else\nbbb\n#endif\n#else\naaa\n#endif\n"
    , "#define x a b c\n#ifndef d\nx1 = {a}\n#else\nx2={b}\n#endif\n#enddef\n"
    , "#define foo x y\n  bar {x}+1 {y} {x}\n#enddef\n#define bar x y z\n  x={x}\n  y={y}\n  z={z}\n#enddef\n{foo 1 3}\n"
+   , "{zzzz}"
    ]
 
 test = runParser preprocessWml (initState "") "" 

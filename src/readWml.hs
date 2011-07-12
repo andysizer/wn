@@ -9,8 +9,7 @@ data Node = Node
 
 readWml:: FilePath -> IO [Node]
 readWml f =
-    do src <- readFile f
-       pre <- preProcessWmlFile f src
+    do pre <- preProcessWmlFile f
        nodes <- parseWml pre
        return nodes
 
