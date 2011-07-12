@@ -9,6 +9,7 @@ module PreProcessWml
 
 import Data.List
 import Data.Map as M
+import Data.IORef
 
 import Text.Parsec.Prim (unexpected)
 
@@ -17,7 +18,7 @@ import ApplicativeParsec
 
 
 ----------------------------------------------------------------------------------
--- PreprocessState
+-- PreProcessorState
 -- Holds the state of the preprocessor
 -- state :       
 --   describes what the preprocess is doing e.g. processing #if or #define.See PState.
@@ -33,20 +34,23 @@ import ApplicativeParsec
 --   Only valid in Defining State. Accumulates the body of the #define being
 --   processed.
 
-data PreprocessState = PreprocessState
+
+data PreProcessorState = PreProcessorState
     {
-      state :: [PState]
+      files :: [FilePath]
+    , continuations :: [Continuation]
     , defines :: DefMap
+    , state :: [LPPState]
     , pendingDefine :: DefSig
     , pendingBody :: String
     }
-        deriving (Eq, Show)
+        -- deriving (Eq, Show)
 
 ----------------------------------------------------------------------------------
 -- PState
--- An enumeration of the possible states of the preprocessor.
+-- An enumeration of the possible states of the preprocessor processing a single file
 
-data PState = Top
+data LPPState = Top
            | ProcessingIf
            | SkippingIf
            | ProcessingElse
@@ -57,25 +61,25 @@ data PState = Top
 ----------------------------------------------------------------------------------
 -- utility functions for manipulation PState
 
-setPState s st = setState $ PreprocessState s (defines st) (pendingDefine st) (pendingBody st)
+setLPPState s st = setState $ mkPPState (files st) (continuations st) (defines st) s (pendingDefine st) (pendingBody st)
 
-popState = 
+popLPPState = 
     do st <- getState
-       setPState (tail $ state st) st
+       setLPPState (tail $ state st) st
 
-pushPState n s =
+pushLPPState n s =
     do st <- getState
-       setPState (n : s) st
+       setLPPState (n : s) st
 
 -- next two used by #if directives
 
-pushIfState True s = pushPState ProcessingIf s
-pushIfState False s = pushPState SkippingIf s
+pushIfState True s = pushLPPState ProcessingIf s
+pushIfState False s = pushLPPState SkippingIf s
 
-switchIfState (ProcessingIf : xs) st = setPState (SkippingElse : xs) st
-switchIfState (SkippingIf : (SkippingElse : xs)) st = setPState (SkippingElse : (SkippingElse : xs)) st
-switchIfState (SkippingIf : (SkippingIf : xs)) st = setPState (SkippingElse : (SkippingIf : xs)) st
-switchIfState (SkippingIf : xs) st = setPState (ProcessingElse : xs) st
+switchIfState (ProcessingIf : xs) st = setLPPState (SkippingElse : xs) st
+switchIfState (SkippingIf : (SkippingElse : xs)) st = setLPPState (SkippingElse : (SkippingElse : xs)) st
+switchIfState (SkippingIf : (SkippingIf : xs)) st = setLPPState (SkippingElse : (SkippingIf : xs)) st
+switchIfState (SkippingIf : xs) st = setLPPState (ProcessingElse : xs) st
 switchIfState _ _ = unexpected ": #else nested incorrectly"
 
 ----------------------------------------------------------------------------------
@@ -99,23 +103,45 @@ data DefSig = DefSig
 
 -----------------------------------------------------------
 -- Initial Preprocessor State
-initState = PreprocessState [Top] M.empty (DefSig "" []) []
+initState f = mkPPState [f] [] M.empty [Top] (DefSig "" []) []
 
+mkPPState fs cs ds s pd pb =
+    PreProcessorState {
+        files = fs,
+        continuations = cs,
+        defines = ds,
+        state = s,
+        pendingDefine = pd,
+        pendingBody = pb
+    }
 -----------------------------------------------------------------------------------
+preProcessWmlFile f = result
+    where pps = initState f
+          result = driver pps
 
-preProcessWmlFile f s = 
-    do 
-       case preProcessWmlFile' initState f s of 
-           Right (r, _) -> return r
-           Left e -> error $ show e
-
-preProcessWmlFile' st n s = runParser preprocessWmlFile'' st n s
+preProcessWmlFile' st n s = do
+    case runParser preprocessWmlFile'' st n s of
+        Right r -> r
+        Left e -> error $ show e
 
 preprocessWmlFile'' = 
     do r <- preprocessWml
        st <- getState
-       return (r, st)
-    
+       return (st, r)
+
+driver :: PreProcessorState -> IO (String)
+driver (PreProcessorState [] [] _ _ _ _) = return ""
+driver (PreProcessorState [] (cont:conts) defines _ _ _) =
+    do let (pps', result) = cont defines
+       result' <- driver pps'
+       return $ result ++ result'
+driver (PreProcessorState (file: files) conts defines lpps pd pb) =
+    do s <-readFile file
+       let pps = mkPPState files conts defines lpps pd pb
+       let (pps', result) = preProcessWmlFile' pps file s
+       result' <- driver pps'
+       return $ result ++ result'
+
 -- preprocess consumes one of more source chars from the input and returns a string
 -- The string can contain
 -- 1. The character consumed
@@ -152,7 +178,7 @@ preprocess' s =
     <|> do c <- process s
            return $ [c]
 
-check :: CharParser PreprocessState String
+check :: CharParser PreProcessorState String
 check =
     do s <- getState
        unexpected $ "current state " ++ (show $ head $ state s)
@@ -163,7 +189,7 @@ check =
 -- NB. We have already consumed the leading '{'
 -- We don't deal with nested substitions ....
 ----------------------------------------------------------------------
-substitute :: CharParser PreprocessState String
+substitute :: CharParser PreProcessorState String
 substitute =
     do pat <- manyTill (noneOf "}") (char '}')
        st <- getState
@@ -174,38 +200,35 @@ substitute =
                     Right s -> s
                     Left e -> fail $ show e
 
-substitute' Nothing pat _ = 
-    do s <- getFileContents pat
+type Continuation = DefMap -> (PreProcessorState, String)
+substitute' Nothing pat _ =
+    do let pat' = expandPat pat
        st <- getState
-       (r, nst) <- preProcessWmlFile st pat s
-       setState nst
-       -- l <- getLineDir
-       return $ r  -- ++ l
-
+       pos <- getPosition
+       i <- getInput
+       let preprocessWmlFile''' pos i =
+               do setPosition pos
+                  setInput i
+                  preprocessWmlFile''
+       let cont = (\d -> 
+                      do let pps = mkPPState (files st) (continuations st) d
+                                             (state st) (pendingDefine st) (pendingBody st)
+                         
+                         case runParser (preprocessWmlFile''' pos i) pps "" "" of
+                                    Right r -> r
+                                    Left e -> error $ show e
+                         )
+       let fs = pat' ++ (files st)
+       let cs = cont : (continuations st)
+       let pps = mkPPState fs cs (defines st) 
+                           [Top] (DefSig "" []) []
+       setState pps
+       return ""
 substitute' (Just d) pat args =
     do args <- getArgs $ unwords args
        return $ substituteArgs d args
 
-
-getFileContents f = readFile f
-
-include n c =
-    do oldPos <- getPosition
-       oldInput <- getInput
-       setPosition $ newPosition n oldPos
-       setInput c
-       r <- preprocessWml
-       setInput oldInput
-       setPosition oldPos
-       putStr r
-
-newPosition n p =
-    setSourceName (setSourceLine (setSourceColumn p 1) 1) n
-
-getLineDir = 
-    do p <- getPosition
-       putStr$ "#line: \"" ++ (sourceName p) ++ "\" " ++ (show $ sourceLine p) ++ " " ++ (show $ sourceColumn p)
---}
+expandPat pat = [pat]
 
 getArgs args = 
     do savedState <- getState
@@ -299,28 +322,27 @@ pdefargs (x:xs) = (("{" ++ x ++ "}"): pdefargs xs)
 
 pendDefine s =
     do st <- getState
-       setState $ PreprocessState (Defining : (state st)) (defines st) s []
+       setState $ mkPPState (files st) (continuations st) (defines st)
+                            (Defining : (state st)) s []
 
 pendBody b =
     do st <- getState
-       setState $ PreprocessState (state st) 
-                                  (defines st) 
-                                  (pendingDefine st) 
-                                  (pendingBody st ++ b ++ "\n")
+       setState $ mkPPState (files st) (continuations st) (defines st)
+                            (state st) (pendingDefine st) (pendingBody st ++ b ++ "\n")
 
 updateDefines =
     do st <- getState
        s <- return $ pendingDefine st
        nm <- return $ M.insert (defName s) (Define s (pendingBody st)) (defines st)
-       ns <- return $ PreprocessState (state st) nm (pendingDefine st) (pendingBody st)
-       setState ns
+       setState $ mkPPState (files st) (continuations st) nm
+                            (state st) (pendingDefine st) (pendingBody st)
 
 ifDirective s = 
     do char 'f'
        ifDirective' s
 
-ifDirective' s@(SkippingIf : _) =  pushPState SkippingIf  s *> skip s
-ifDirective' s@(SkippingElse  :_) =  pushPState SkippingIf s *> skip s
+ifDirective' s@(SkippingIf : _) =  pushLPPState SkippingIf  s *> skip s
+ifDirective' s@(SkippingElse  :_) =  pushLPPState SkippingIf s *> skip s
 ifDirective' s@(Defining  :_) =  unexpected ": #if not supported inside #define"
 ifDirective' s =
         char 'd' *> ifdef s
@@ -395,10 +417,10 @@ endif s =
        endif' s
        retnl
 
-endif' (ProcessingIf : _) = popState
-endif' (SkippingIf : _) = popState
-endif' (ProcessingElse : _) = popState
-endif' (SkippingElse : _) = popState
+endif' (ProcessingIf : _) = popLPPState
+endif' (SkippingIf : _) = popLPPState
+endif' (ProcessingElse : _) = popLPPState
+endif' (SkippingElse : _) = popLPPState
 endif' _ = unexpected ": #endif nested incorrectly"
 
 enddef s = 
@@ -408,11 +430,11 @@ enddef s =
        restOfLine
        retnl
 
-enddef' (SkippingIf : _) = popState
-enddef' (SkippingElse : _) = popState
+enddef' (SkippingIf : _) = popLPPState
+enddef' (SkippingElse : _) = popLPPState
 enddef' (Defining : _) = 
     do updateDefines
-       popState
+       popLPPState
 
 enddef' _ = unexpected ": #enddef"
 
@@ -428,7 +450,9 @@ undef' [] = unexpected ": #undef missing symbol"
 undef' (k: _) =
     do st <- getState
        nm <- return $ M.delete k (defines st)
-       return $ PreprocessState (state st) nm
+       return $ mkPPState (files st) (continuations st) nm
+                          (state st) (pendingDefine st) (pendingBody st)
+
 
 retnl = return '\n'
 
@@ -450,5 +474,5 @@ tn =
    , "#define foo x y\n  bar {x}+1 {y} {x}\n#enddef\n#define bar x y z\n  x={x}\n  y={y}\n  z={z}\n#enddef\n{foo 1 3}\n"
    ]
 
-test = runParser preprocessWml initState "" 
+test = runParser preprocessWml (initState "") "" 
 
