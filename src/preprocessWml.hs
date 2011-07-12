@@ -206,18 +206,15 @@ substitute' Nothing pat _ =
        st <- getState
        pos <- getPosition
        i <- getInput
-       let preprocessWmlFile''' pos i =
+       let preprocessWmlFile =
                do setPosition pos
                   setInput i
                   preprocessWmlFile''
-       let cont = (\d -> 
-                      do let pps = mkPPState (files st) (continuations st) d
-                                             (state st) (pendingDefine st) (pendingBody st)
-                         
-                         case runParser (preprocessWmlFile''' pos i) pps "" "" of
-                                    Right r -> r
-                                    Left e -> error $ show e
-                         )
+       let cont d = do let pps = mkPPState (files st) (continuations st) d
+                                            (state st) (pendingDefine st) (pendingBody st)
+                       case runParser preprocessWmlFile pps "" "" of
+                            Right r -> r
+                            Left e -> error $ show e
        let fs = pat' ++ (files st)
        let cs = cont : (continuations st)
        let pps = mkPPState fs cs (defines st) 
