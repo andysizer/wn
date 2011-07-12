@@ -9,7 +9,6 @@ module PreProcessWml
 
 import Data.List
 import Data.Map as M
-import Data.IORef
 
 import Text.Parsec.Prim (unexpected)
 
@@ -432,7 +431,6 @@ enddef' (SkippingElse : _) = popLPPState
 enddef' (Defining : _) = 
     do updateDefines
        popLPPState
-
 enddef' _ = unexpected ": #enddef"
 
 undef (SkippingIf : _) = restOfLine *> retnl
