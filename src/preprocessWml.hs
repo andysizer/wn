@@ -450,7 +450,6 @@ undef' (k: _) =
        return $ mkPPState (files st) (continuations st) nm
                           (state st) (pendingDefine st) (pendingBody st)
 
-
 retnl = return '\n'
 
 eol =   
