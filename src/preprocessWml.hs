@@ -1,19 +1,24 @@
 -- file: preprocessWml.hs
 
-
 module PreProcessWml
 (
   preProcessWmlFile
 ) 
     where
 
-import Data.List
+import Control.Monad
+
+import Data.List as L
 import Data.Map as M
 
-import Text.Parsec.Prim (unexpected)
+import System.Directory
+import System.FilePath
 
+import Text.Parsec.Prim (unexpected)
 import Text.ParserCombinators.Parsec.Prim (getState, setState)
+
 import ApplicativeParsec
+import GameConfig
 
 
 ----------------------------------------------------------------------------------
@@ -36,7 +41,8 @@ import ApplicativeParsec
 
 data PreProcessorState = PreProcessorState
     {
-      files :: [FilePath]
+      path :: Maybe FilePath
+    , files :: [FilePath]
     , continuations :: [Continuation]
     , defines :: DefMap
     , state :: [LPPState]
@@ -60,7 +66,8 @@ data LPPState = Top
 ----------------------------------------------------------------------------------
 -- utility functions for manipulation PState
 
-setLPPState s st = setState $ mkPPState (files st) (continuations st) (defines st) s (pendingDefine st) (pendingBody st)
+setLPPState s st = setState $ mkPPState (path st) (files st) (continuations st) (defines st) 
+                                        s (pendingDefine st) (pendingBody st)
 
 popLPPState = 
     do st <- getState
@@ -102,10 +109,11 @@ data DefSig = DefSig
 
 -----------------------------------------------------------
 -- Initial Preprocessor State
-initState f = mkPPState [f] [] M.empty [Top] (DefSig "" []) []
+initState path = mkPPState (Just path) [] [] M.empty [Top] (DefSig "" []) []
 
-mkPPState fs cs ds s pd pb =
+mkPPState p fs cs ds s pd pb =
     PreProcessorState {
+        path = p,
         files = fs,
         continuations = cs,
         defines = ds,
@@ -114,9 +122,57 @@ mkPPState fs cs ds s pd pb =
         pendingBody = pb
     }
 -----------------------------------------------------------------------------------
-preProcessWmlFile f = result
-    where pps = initState f
-          result = driver pps
+-- expand a path according to the following rules from
+-- http://wiki.wesnoth.org/PreprocessorRef
+-- 1. pathname - a path under the wesnoth data/ subdirectory
+-- 2. ~pathname - a path relative to the data/ subdirectory of the user's data directory
+-- 3. ./pathname - a path relative to the directory containing the file in which the pattern appears.
+
+expandPath _ ('~':path) = expandPath' $ userDataPath </> path
+expandPath rel ('.':('/':path)) = expandRelativePath rel path
+expandPath _ path = expandPath' $ systemDataPath </> path
+
+expandRelativePath [] path = error $ "Invalid relative path name ./" ++ path
+expandRelativePath (f:_) path = expandPath' $ takeDirectory f </> path
+
+expandPath' filePath =
+    do dir <- doesDirectoryExist filePath
+       if dir
+       then expandDirectory filePath
+       else return $ [filePath]
+
+expandDirectory filePath =
+    do let _main = filePath </> "_main.cfg"
+       exist <- doesFileExist $ _main
+       if exist
+       then return $ [_main]
+       else expandDirectory' filePath
+
+expandDirectory' filePath =
+    do c <- getDirectoryContents filePath
+       let (i,c') = L.partition ((==) "_initial.cfg") c
+       let (f,c'') = L.partition ((==) "_final.cfg") c'
+       let c''' = L.map (combine filePath) $ L.sort c''
+       c'''' <- mapM expandPath' c'''
+       return $ i ++ concat c'''' ++ f
+
+preProcessWmlFile f = driver $ initState f
+
+driver :: PreProcessorState -> IO (String)
+driver (PreProcessorState (Just path) files conts defines lpps pd pb) =
+    do files' <- expandPath files path
+       driver $ mkPPState Nothing (files' ++ files) conts defines lpps pd pb
+driver (PreProcessorState Nothing [] [] _ _ _ _) = return ""
+driver (PreProcessorState Nothing [] (cont:conts) defines _ _ _) =
+    do let (pps', result) = cont defines
+       result' <- driver pps'
+       return $ result ++ result'
+driver (PreProcessorState Nothing (file: files) conts defines lpps pd pb) =
+    do s <- readFile file
+       let pps = mkPPState Nothing files conts defines lpps pd pb
+       let (pps', result) = preProcessWmlFile' pps file s
+       result' <- driver pps'
+       return $ result ++ result'
 
 preProcessWmlFile' st n s = do
     case runParser preprocessWmlFile'' st n s of
@@ -136,18 +192,6 @@ lineInfo =
        let c = show $ sourceColumn pos
        return $ "\n#line \"" ++ n ++ "\" " ++ l ++ " " ++ c ++ "\n"
 
-driver :: PreProcessorState -> IO (String)
-driver (PreProcessorState [] [] _ _ _ _) = return ""
-driver (PreProcessorState [] (cont:conts) defines _ _ _) =
-    do let (pps', result) = cont defines
-       result' <- driver pps'
-       return $ result ++ result'
-driver (PreProcessorState (file: files) conts defines lpps pd pb) =
-    do s <-readFile file
-       let pps = mkPPState files conts defines lpps pd pb
-       let (pps', result) = preProcessWmlFile' pps file s
-       result' <- driver pps'
-       return $ result ++ result'
 
 -- preprocess consumes one of more source chars from the input and returns a string
 -- The string can contain
@@ -157,18 +201,15 @@ driver (PreProcessorState (file: files) conts defines lpps pd pb) =
 -- It is assumed preprocess will called repeatedly on given input and the results
 -- concat'ed to form the result of the preprocess all the input.
 
---preprocessWml :: CharParser PreprocessState String
 preprocessWml = 
     do s <- preprocess
        preprocessWml' s
 
---preprocessWml' :: String -> CharParser PreprocessState String
 preprocessWml' "" = return ""
 preprocessWml' c =
     do cs <- preprocessWml
        return $ c ++ cs
        
---preprocess :: CharParser PreprocessState String
 preprocess =
         eof *> return ""
     <|> do st <- getState
@@ -209,30 +250,26 @@ substitute =
 
 type Continuation = DefMap -> (PreProcessorState, String)
 substitute' Nothing pat _ =
-    do let pat' = expandPat pat
-       st <- getState
+    do st <- getState
        pos <- getPosition
        i <- getInput
        let preprocessWmlFile =
                do setPosition pos
                   setInput i
                   preprocessWmlFile''
-       let cont d = do let pps = mkPPState (files st) (continuations st) d
-                                            (state st) (pendingDefine st) (pendingBody st)
+       let cont d = do let pps = mkPPState (path st) (files st) (continuations st) d
+                                           (state st) (pendingDefine st) (pendingBody st)
                        case runParser preprocessWmlFile pps "" "" of
                             Right r -> r
                             Left e -> error $ show e
-       let fs = pat' ++ (files st)
        let cs = cont : (continuations st)
-       let pps = mkPPState fs cs (defines st) 
+       let pps = mkPPState (Just pat) (files st) cs (defines st) 
                            [Top] (DefSig "" []) []
        setState pps
        return ""
 substitute' (Just d) pat args =
     do args <- getArgs $ unwords args
        return $ substituteArgs d args
-
-expandPat pat = [pat]
 
 getArgs args = 
     do savedState <- getState
@@ -258,7 +295,7 @@ substituteArgs' (x:xs) (y:ys) b = substituteArgs' xs ys (replace x y b)
 
 replace _ _ [] = []
 replace old new xs@(y:ys) =
-    case stripPrefix old xs of
+    case L.stripPrefix old xs of
          Nothing -> y : replace old new ys
          Just ys' -> new ++ replace old new ys'
 
@@ -326,19 +363,19 @@ pdefargs (x:xs) = (("{" ++ x ++ "}"): pdefargs xs)
 
 pendDefine s =
     do st <- getState
-       setState $ mkPPState (files st) (continuations st) (defines st)
+       setState $ mkPPState (path st) (files st) (continuations st) (defines st)
                             (Defining : (state st)) s []
 
 pendBody b =
     do st <- getState
-       setState $ mkPPState (files st) (continuations st) (defines st)
+       setState $ mkPPState (path st) (files st) (continuations st) (defines st)
                             (state st) (pendingDefine st) (pendingBody st ++ b ++ "\n")
 
 updateDefines =
     do st <- getState
        s <- return $ pendingDefine st
        nm <- return $ M.insert (defName s) (Define s (pendingBody st)) (defines st)
-       setState $ mkPPState (files st) (continuations st) nm
+       setState $ mkPPState (path st) (files st) (continuations st) nm
                             (state st) (pendingDefine st) (pendingBody st)
 
 ifDirective s = 
@@ -453,7 +490,7 @@ undef' [] = unexpected ": #undef missing symbol"
 undef' (k: _) =
     do st <- getState
        nm <- return $ M.delete k (defines st)
-       return $ mkPPState (files st) (continuations st) nm
+       return $ mkPPState (path st) (files st) (continuations st) nm
                           (state st) (pendingDefine st) (pendingBody st)
 
 retnl = return '\n'
