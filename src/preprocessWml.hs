@@ -11,6 +11,7 @@ import Control.Monad
 import Data.List as L
 import Data.Map as M
 
+import System.IO 
 import System.Directory
 import System.FilePath
 
@@ -20,6 +21,11 @@ import Text.ParserCombinators.Parsec.Prim (getState, setState)
 import ApplicativeParsec
 import GameConfig
 
+readFileUtf8 f = do
+   h <- openFile f ReadMode
+   hSetEncoding h utf8
+   s <- hGetContents h
+   return s
 
 ----------------------------------------------------------------------------------
 -- PreProcessorState
@@ -61,6 +67,7 @@ data LPPState = Top
            | ProcessingElse
            | SkippingElse
            | Defining
+           | TextDomain
         deriving (Eq, Show)
 
 ----------------------------------------------------------------------------------
@@ -139,7 +146,14 @@ expandPath' filePath =
     do dir <- doesDirectoryExist filePath
        if dir
        then expandDirectory filePath
-       else return $ [filePath]
+       else return $ checkFile filePath (takeExtension filePath)
+
+checkFile f ".cfg" = [f]
+checkFile _ _ = []
+
+expandPath'' _ ".." = return []
+expandPath'' _ "." = return []
+expandPath'' p f = expandPath' $ p </> f
 
 expandDirectory filePath =
     do let _main = filePath </> "_main.cfg"
@@ -152,9 +166,8 @@ expandDirectory' filePath =
     do c <- getDirectoryContents filePath
        let (i,c') = L.partition ((==) "_initial.cfg") c
        let (f,c'') = L.partition ((==) "_final.cfg") c'
-       let c''' = L.map (combine filePath) $ L.sort c''
-       c'''' <- mapM expandPath' c'''
-       return $ i ++ concat c'''' ++ f
+       c''' <- mapM (expandPath'' filePath) $ L.sort c'' 
+       return $ i ++ concat c''' ++ f
 
 preProcessWmlFile f = driver $ initState f
 
@@ -168,7 +181,7 @@ driver (PreProcessorState Nothing [] (cont:conts) defines _ _ _) =
        result' <- driver pps'
        return $ result ++ result'
 driver (PreProcessorState Nothing (file: files) conts defines lpps pd pb) =
-    do s <- readFile file
+    do s <- readFileUtf8 file
        let pps = mkPPState Nothing files conts defines lpps pd pb
        let (pps', result) = preProcessWmlFile' pps file s
        result' <- driver pps'
@@ -221,6 +234,13 @@ preprocess' s@(SkippingIf : _ ) =
 preprocess' s@(SkippingElse :_ ) =
     do c <- process s
        return [c]
+preprocess' s@(Defining :_ ) =
+    do c <- process s
+       return [c]
+preprocess' s@(TextDomain :_ ) =
+    do popLPPState
+       c <- process s
+       return $ "textdomain" ++ [c]
 preprocess' s =
         char '{' *> substitute
     <|> do c <- process s
@@ -229,7 +249,7 @@ preprocess' s =
 check :: CharParser PreProcessorState String
 check =
     do s <- getState
-       unexpected $ "current state " ++ (show $ head $ state s)
+       unexpected $ "current state " ++ (show $ state s)
        return ""
 ----------------------------------------------------------------------
 -- Substitution - this can be macro expansion or file inclusion
@@ -316,18 +336,21 @@ skip s =
 
 processChar s@(SkippingIf : _) =  skip s
 processChar s@(SkippingElse : _) = skip s
-processChar s@(Defining : _) =
-    do b <- many (noneOf "\n\r#")
-       pendBody b
-       (char '#' *> directive s) <|> (restOfLine *> retnl)
-processChar _ = anyChar
+processChar s
+    | Defining `elem` s =
+        do b <- many (noneOf "\n\r#")
+           pendBody b
+           (char '#' *> directive s) <|> (restOfLine *> retnl)
+    | otherwise = anyChar
 
 directive s =
         char ' ' *> comment
-    <|> char 'd' *> define s
-    <|> char 'i' *> ifDirective s
-    <|> char 'e' *> elseEnd s
-    <|> char 'u' *> undef s 
+    <|> try (string "textdomain") *> textDomain s
+    <|> try (char 'd' *> define s)
+    <|> try (char 'i' *> ifDirective s)
+    <|> try (char 'e' *> elseEnd s)
+    <|> try (char 'u' *> undef s)
+    <|> comment -- hmm seems like there isn't always a space first thing
     <?> "preprocessor directive"
 
 comment =
@@ -337,6 +360,8 @@ comment =
 lineEnd = eol <|> (eof *> return "\n")
 
 restOfLine = manyTill (noneOf "\n\r") lineEnd
+
+textDomain s = pushLPPState TextDomain s *> return '#'
 
 define s@(SkippingIf : _) =  skip s
 define s@(SkippingElse  :_) =  skip s
@@ -384,7 +409,7 @@ ifDirective s =
 
 ifDirective' s@(SkippingIf : _) =  pushLPPState SkippingIf  s *> skip s
 ifDirective' s@(SkippingElse  :_) =  pushLPPState SkippingIf s *> skip s
-ifDirective' s@(Defining  :_) =  unexpected ": #if not supported inside #define"
+-- ifDirective' s@(Defining  :_) =  unexpected ": #if not supported inside #define"
 ifDirective' s =
         char 'd' *> ifdef s
     <|> char 'h' *> ifhave s
@@ -511,8 +536,12 @@ tn =
    , "#define d1\n#enddef\n#define d2\n#enddef\n#ifdef d1\nxxx\n#ifdef d2\nyyy\n#else\nbbb\n#endif\n#else\naaa\n#endif\n"
    , "#define x a b c\n#ifndef d\nx1 = {a}\n#else\nx2={b}\n#endif\n#enddef\n"
    , "#define foo x y\n  bar {x}+1 {y} {x}\n#enddef\n#define bar x y z\n  x={x}\n  y={y}\n  z={z}\n#enddef\n{foo 1 3}\n"
-   , "{zzzz}"
+   , "#textdomain zzz"
+   , "#textdomain zzz\n#define foo x y\n  bar {x}+1 {y} {x}\n#enddef\n#define bar x y z\n  x={x}\n  y={y}\n  z={z}\n#enddef\n{foo 1 3}\n"
+   , "#define RAMP_BRIDGE S0 S1 S2 S3 S4 S5\n        map=\"\n,  {S0}\n{S5},   {S1}\n,  1\n{S4},   {S2}\n,  {S3}\"\n#enddef"
    ]
 
+tn1 = "#define RAMP_BRIDGE S0 S1 S2 S3 S4 S5\n        map=\"\n,  {S0}\n{S5},   {S1}\n,  1\n{S4},   {S2}\n,  {S3}\"\n#enddef"
 test = runParser preprocessWml (initState "") "" 
 
+pp x y = do { p <- preProcessWmlFile x; writeFile y p;}
