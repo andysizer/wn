@@ -3,6 +3,7 @@
 module PreProcessWml
 (
   preProcessWmlFile
+, pp
 ) 
     where
 
@@ -156,10 +157,10 @@ checkFile _ _ = []
 
 expandPath'' _ ".." = return []
 expandPath'' _ "." = return []
-expandPath'' p f = expandPath' $ p </> f
+expandPath'' p f = expandPath' $ normalise $ p </> f
 
 expandDirectory filePath =
-    do let _main = filePath </> "_main.cfg"
+    do let _main = normalise $ filePath </> "_main.cfg"
        exist <- doesFileExist $ _main
        if exist
        then return $ [_main]
@@ -169,8 +170,10 @@ expandDirectory' filePath =
     do c <- getDirectoryContents filePath
        let (i,c') = L.partition ((==) "_initial.cfg") c
        let (f,c'') = L.partition ((==) "_final.cfg") c'
+       i' <- mapM (expandPath'' filePath) $ i 
+       f' <- mapM (expandPath'' filePath) $ f 
        c''' <- mapM (expandPath'' filePath) $ L.sort c'' 
-       return $ i ++ concat c''' ++ f
+       return $ concat i' ++ concat c''' ++ concat f'
 
 preProcessWmlFile f = driver $ initState f
 
@@ -248,7 +251,7 @@ preprocess' s@(TextDomain :_ ) =
        c <- process s
        return $ "textdomain" ++ [c]
 preprocess' s =
-        char '{' *> substitute
+        char '{' *> substitute '}'
     <|> do c <- process s
            return $ [c]
 
@@ -263,18 +266,27 @@ check =
 -- NB. We have already consumed the leading '{'
 -- We don't deal with nested substitions ....
 ----------------------------------------------------------------------
-substitute :: CharParser PreProcessorState String
-substitute =
-    do pat <- manyTill (noneOf "}") (char '}')
+
+substitute c =
+    do (h : t) <- spaces *> manyTill substituteItem (char c)
        st <- getState
-       (s: args) <- return $ words pat
-       d <- return $ M.lookup s (defines st)
-       n <- substitute' d pat args
+       d <- return $ M.lookup h (defines st)
+       n <- substitute' d h t
        return $ case runParser preprocessWml st "" n of
                     Right s -> s
                     Left e -> fail $ show e
 
+substituteItem =
+      char '(' *> bracketItem <* spaces
+    <|> char '{' *> substitute '}' <* spaces
+    <|> many (noneOf " )}\n\r\t") <* spaces
+
+bracketItem =
+    do l <- substitute ')'
+       return $ "(" ++ l ++ ")" 
+
 type Continuation = DefMap -> (PreProcessorState, String)
+
 substitute' Nothing pat _ =
     do st <- getState
        pos <- getPosition
@@ -292,31 +304,11 @@ substitute' Nothing pat _ =
        let pps = mkPPState (Just pat) ((Cont cont file) : (work st)) (defines st) [Top] (DefSig "" []) []
        setState pps
        return ""
-substitute' (Just d) pat args =
-    do args <- getArgs $ unwords args
-       return $ substituteArgs d args
+substitute' (Just d) pat args = return $ substituteArgs  (defArgs (sig d)) args (body d)
 
-getArgs args = 
-    do savedState <- getState
-       (Right l) <- return $ parse parseArgs "" args
-       setState savedState
-       return l
-
-parseArgs = sepBy parseArg space
-
-parseArg = 
-        spaces *> compoundArg 
-    <|> spaces *> many (noneOf " \n\r\t")
-
-compoundArg = between (char '(') (char ')') (many (noneOf ")"))
-
-substituteArgs :: Define -> [String] -> String 
-substituteArgs d a = r
-    where r = substituteArgs' (defArgs (sig d)) a (body d)
-
-substituteArgs' [] _ b = b
-substituteArgs' (x:xs) [] b = substituteArgs' xs [] (replace x [] b)
-substituteArgs' (x:xs) (y:ys) b = substituteArgs' xs ys (replace x y b)
+substituteArgs [] _ b = b
+substituteArgs (x:xs) [] b = substituteArgs xs [] (replace x [] b)
+substituteArgs (x:xs) (y:ys) b = substituteArgs xs ys (replace x y b)
 
 replace _ _ [] = []
 replace old new xs@(y:ys) =
@@ -547,6 +539,20 @@ tn =
    ]
 
 tn1 = "#define RAMP_BRIDGE S0 S1 S2 S3 S4 S5\n        map=\"\n,  {S0}\n{S5},   {S1}\n,  1\n{S4},   {S2}\n,  {S3}\"\n#enddef"
+tn2 = "#define foo x y # sdsd\nv1={x}\nv2={y}\n#enddef\n{foo 1 2}"
+
 test = runParser preprocessWml (initState "") "" 
 
-pp x y = do { p <- preProcessWmlFile x; writeFile y p;}
+p = preprocess
+
+f = "~C:\\Users\\andy\\Projects\\wesnoth-1.8.6\\data\\themes\\"
+fc = "~C:\\Users\\andy\\Projects\\wesnoth-1.8.6\\data\\core\\"
+f1 = "~C:\\Users\\andy\\Projects\\wesnoth-1.8.6\\data\\themes/macros.cfg"
+
+pp x y = do { p <- preProcessWmlFile x; writeFileUtf8 y p;}
+
+writeFileUtf8 f s = do
+   h <- openFile f WriteMode
+   hSetEncoding h utf8
+   hPutStr h s
+   hClose h
