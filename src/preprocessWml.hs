@@ -3,7 +3,11 @@
 module PreProcessWml
 (
   preProcessWmlFile
+, preProcessWml
+, preProcess
+, check
 , pp
+, initState
 ) 
     where
 
@@ -21,12 +25,8 @@ import Text.ParserCombinators.Parsec.Prim (getState, setState)
 
 import ApplicativeParsec
 import GameConfig
+import Utf8ReadWriteFile
 
-readFileUtf8 f = do
-   h <- openFile f ReadMode
-   hSetEncoding h utf8
-   s <- hGetContents h
-   return s
 
 ----------------------------------------------------------------------------------
 -- PreProcessorState
@@ -197,13 +197,13 @@ driver (PreProcessorState Nothing ((File file): work) defines lpps pd pb) =
        return $ result ++ result'
 
 preProcessWmlFile' st n s = do
-    case runParser preprocessWmlFile'' st n s of
+    case runParser preProcessWmlFile'' st n s of
         Right r -> r
         Left e -> error $ show e
 
-preprocessWmlFile'' = 
+preProcessWmlFile'' = 
     do l <- lineInfo
-       r <- preprocessWml
+       r <- preProcessWml
        st <- getState
        return (st, l ++ r)
 
@@ -215,42 +215,42 @@ lineInfo =
        return $ "\n#line \"" ++ n ++ "\" " ++ l ++ " " ++ c ++ "\n"
 
 
--- preprocess consumes one of more source chars from the input and returns a string
+-- preProcess consumes one of more source chars from the input and returns a string
 -- The string can contain
 -- 1. The character consumed
 -- 2. A new line i.e. when skipping a failed If branch
 -- 3. The result of a substition.
--- It is assumed preprocess will called repeatedly on given input and the results
--- concat'ed to form the result of the preprocess all the input.
+-- It is assumed preProcess will called repeatedly on given input and the results
+-- concat'ed to form the result of the preProcess all the input.
 
-preprocessWml = 
-    do s <- preprocess
-       preprocessWml' s
+preProcessWml = 
+    do s <- preProcess
+       preProcessWml' s
 
-preprocessWml' "" = return ""
-preprocessWml' c =
-    do cs <- preprocessWml
+preProcessWml' "" = return ""
+preProcessWml' c =
+    do cs <- preProcessWml
        return $ c ++ cs
        
-preprocess =
+preProcess =
         eof *> return ""
     <|> do st <- getState
-           preprocess' $ state st
+           preProcess' $ state st
 
-preprocess' s@(SkippingIf : _ ) =
+preProcess' s@(SkippingIf : _ ) =
     do c <- process s
        return [c]
-preprocess' s@(SkippingElse :_ ) =
+preProcess' s@(SkippingElse :_ ) =
     do c <- process s
        return [c]
-preprocess' s@(Defining :_ ) =
+preProcess' s@(Defining :_ ) =
     do c <- process s
        return [c]
-preprocess' s@(TextDomain :_ ) =
+preProcess' s@(TextDomain :_ ) =
     do popLPPState
        c <- process s
        return $ "textdomain" ++ [c]
-preprocess' s =
+preProcess' s =
         char '{' *> substitute '}'
     <|> do c <- process s
            return $ [c]
@@ -272,7 +272,7 @@ substitute c =
        st <- getState
        d <- return $ M.lookup h (defines st)
        n <- substitute' d h t
-       return $ case runParser preprocessWml st "" n of
+       return $ case runParser preProcessWml st "" n of
                     Right s -> s
                     Left e -> fail $ show e
 
@@ -292,13 +292,13 @@ substitute' Nothing pat _ =
        pos <- getPosition
        let file= sourceName pos
        i <- getInput
-       let preprocessWmlFile =
+       let preProcessWmlFile =
                do setPosition pos
                   setInput i
-                  preprocessWmlFile''
+                  preProcessWmlFile''
        let cont d = do let pps = mkPPState (path st) (work st) d
                                            (state st) (pendingDefine st) (pendingBody st)
-                       case runParser preprocessWmlFile pps "" "" of
+                       case runParser preProcessWmlFile pps "" "" of
                             Right r -> r
                             Left e -> error $ show e
        let pps = mkPPState (Just pat) ((Cont cont file) : (work st)) (defines st) [Top] (DefSig "" []) []
@@ -523,36 +523,5 @@ eol =
     <|> string "\n"
     <|> string "\r"
 
-tn = 
-   [
-     "xxx" -- pass
-   , "#" -- fail
-   , "# gsgsg"
-   , "zzz# sdsd"
-   , "#define foo x y # sdsd\nv1={x}\nv2={y}\n#enddef\n{foo 1 2}" -- pass
-   , "#define d1\n#enddef\n#define d2\n#enddef\n#ifdef d1\nxxx\n#ifdef d2\nyyy\n#else\nbbb\n#endif\n#else\naaa\n#endif\n"
-   , "#define x a b c\n#ifndef d\nx1 = {a}\n#else\nx2={b}\n#endif\n#enddef\n"
-   , "#define foo x y\n  bar {x}+1 {y} {x}\n#enddef\n#define bar x y z\n  x={x}\n  y={y}\n  z={z}\n#enddef\n{foo 1 3}\n"
-   , "#textdomain zzz"
-   , "#textdomain zzz\n#define foo x y\n  bar {x}+1 {y} {x}\n#enddef\n#define bar x y z\n  x={x}\n  y={y}\n  z={z}\n#enddef\n{foo 1 3}\n"
-   , "#define RAMP_BRIDGE S0 S1 S2 S3 S4 S5\n        map=\"\n,  {S0}\n{S5},   {S1}\n,  1\n{S4},   {S2}\n,  {S3}\"\n#enddef"
-   ]
-
-tn1 = "#define RAMP_BRIDGE S0 S1 S2 S3 S4 S5\n        map=\"\n,  {S0}\n{S5},   {S1}\n,  1\n{S4},   {S2}\n,  {S3}\"\n#enddef"
-tn2 = "#define foo x y # sdsd\nv1={x}\nv2={y}\n#enddef\n{foo 1 2}"
-
-test = runParser preprocessWml (initState "") "" 
-
-p = preprocess
-
-f = "~C:\\Users\\andy\\Projects\\wesnoth-1.8.6\\data\\themes\\"
-fc = "~C:\\Users\\andy\\Projects\\wesnoth-1.8.6\\data\\core\\"
-f1 = "~C:\\Users\\andy\\Projects\\wesnoth-1.8.6\\data\\themes/macros.cfg"
-
+-- A little utility
 pp x y = do { p <- preProcessWmlFile x; writeFileUtf8 y p;}
-
-writeFileUtf8 f s = do
-   h <- openFile f WriteMode
-   hSetEncoding h utf8
-   hPutStr h s
-   hClose h
