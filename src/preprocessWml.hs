@@ -321,20 +321,26 @@ replace old new xs@(y:ys) =
 -- non-substitution code 
 ----------------------------------------------
 
-process s =
-        char '#' *> directive s
-    <|> processChar s
+process s = do
+    c <- anyChar
+    process' s c
+
+process' s '#' = directive s
+process' s c = processChar s c 
+
+processChar s@(SkippingIf : _) c =  skip s
+processChar s@(SkippingElse : _)  c = skip s
+processChar s c = do
+    st <- getState
+    processChar' s c (pendingDefine st)
 
 skip s = many (noneOf "#") *> char '#' *> directive s
 
-processChar s@(SkippingIf : _) =  skip s
-processChar s@(SkippingElse : _) = skip s
-processChar s
-    | Defining `elem` s = do
-        b <- many (noneOf "\n\r#")
-        pendBody b
-        (char '#' *> directive s) <|> (restOfLine *> retnl)
-    | otherwise = anyChar
+processChar' s c Nothing = return c
+processChar' s c _ = do
+    b <- many (noneOf "\n\r#")
+    pendBody (c:b)
+    (char '#' *> directive s) <|> (restOfLine *> retnl)
 
 directive s =
         char ' ' *> comment
