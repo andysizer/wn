@@ -119,15 +119,15 @@ type DefMap = M.Map String Define
 
 data Define = Define
     {
-      sig :: DefSig
-    , body :: String
+      sig :: !DefSig
+    , body :: !String
     }
         deriving (Eq, Show)
 
 data DefSig = DefSig
     {
-      defName :: String
-    , defArgs :: [String]
+      defName :: !String
+    , defArgs :: ![String]
     }
         deriving (Eq, Show)
 
@@ -325,12 +325,7 @@ process s =
         char '#' *> directive s
     <|> processChar s
 
-skip s =
-        (char '#' *> directive s)
-    -- <|> eol *> retnl
-    <|> eof *> retnl
-    <|> anyChar *> skip s
-    <?> "fell off end"
+skip s = many (noneOf "#") *> char '#' *> directive s
 
 processChar s@(SkippingIf : _) =  skip s
 processChar s@(SkippingElse : _) = skip s
@@ -357,7 +352,7 @@ comment = do
 
 lineEnd = eol <|> (eof *> return '\n')
 
-restOfLine = manyTill (noneOf "\n\r") lineEnd
+restOfLine = many (noneOf "\n") <* eol -- lineEnd
 
 textDomain s = pushLPPState TextDomain s *> return '#'
 
