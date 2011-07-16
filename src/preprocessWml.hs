@@ -4,7 +4,7 @@ module PreProcessWml
 (
   preProcessWmlFile
 , preProcessWml
-, preProcess
+-- , preProcess
 , check
 , pp
 , initState
@@ -224,36 +224,28 @@ lineInfo = do
 -- concat'ed to form the result of the preProcess all the input.
 
 preProcessWml = do
-    s <- preProcess
-    preProcessWml' s
+    st <- getState
+    preProcessWml' $ state st
 
-preProcessWml' "" = return ""
-preProcessWml' c = do
-    cs <- preProcessWml
-    return $ c ++ cs
-       
-preProcess =
-        eof *> return ""
-    <|> do st <- getState
-           preProcess' $ state st
-
-preProcess' s@(SkippingIf : _ ) = do
-    c <- process s
-    return [c]
-preProcess' s@(SkippingElse :_ ) = do
-    c <- process s
-    return [c]
-preProcess' s@(Defining :_ ) = do
-    c <- process s
-    return [c]
-preProcess' s@(TextDomain :_ ) = do
+preProcessWml' s@(TextDomain :_ ) = do
     popLPPState
+    st <- getState
+    cs <- preProcessWml' $ state st
+    return $ "textdomain" ++ cs
+preProcessWml' s = do
+    cs <- getInput
+    preProcessWml'' s cs
+
+preProcessWml'' s [] = return ""
+preProcessWml'' s ('{': _) = char '{' *> substitute '}'
+
+preProcessWml'' s _ = preProcessWml''' s
+
+preProcessWml''' s = do
     c <- process s
-    return $ "textdomain" ++ [c]
-preProcess' s =
-        char '{' *> substitute '}'
-    <|> do c <- process s
-           return $ [c]
+    st <- getState
+    cs <- preProcessWml' $ state st
+    return $ (c:cs)
 
 check :: CharParser PreProcessorState String
 check = do
@@ -267,23 +259,20 @@ check = do
 -- We don't deal with nested substitions ....
 ----------------------------------------------------------------------
 
-substitute c = do
-    (h : t) <- spaces *> manyTill substituteItem (char c)
+substitute r = do
+    (h : t) <- spaces *> manyTill substituteItem (char r)
     st <- getState
     d <- return $ M.lookup h (defines st)
-    n <- substitute' d h t
-    return $ case runParser preProcessWml st "" n of
-                 Right s -> s
-                 Left e -> fail $ show e
+    substitute' d h t
 
 substituteItem =
-      char '(' *> bracketItem <* spaces
-    <|> char '{' *> substitute '}' <* spaces
-    <|> many (noneOf " )}\n\r\t") <* spaces
+        char '(' *> (substituteItem' '(' ')') <* spaces
+    <|> char '{' *> (substituteItem' '{' '}') <* spaces
+    <|> many (noneOf " ()}}\n\r\t" ) <* spaces
 
-bracketItem = do
-    l <- substitute ')'
-    return $ "(" ++ l ++ ")" 
+substituteItem' l r = do
+    items <- manyTill substituteItem (char r)
+    return $ [l] ++ concat items ++ [r]
 
 type Continuation = DefMap -> (PreProcessorState, String)
 
@@ -305,7 +294,18 @@ substitute' Nothing pat _ = do
     let pps = mkPPState (Just pat) ((Cont cont file) : (work st)) (defines st) [Top] Nothing []
     setState pps
     return ""
-substitute' (Just d) pat args = return $ substituteArgs  (defArgs (sig d)) args (body d)
+substitute' (Just d) pat args = do
+    let scs = substituteArgs  (defArgs (sig d)) args (body d)
+    st <- getState
+    let s = state st
+    let pps = mkPPState Nothing [] (defines st) [Top] Nothing []
+    let scs' = case runParser preProcessWml pps "" scs of
+                   Right r -> r
+                   Left e -> fail $ show e
+    cs <- preProcessWml' s
+    return $ scs' ++ cs
+
+
 
 substituteArgs [] _ b = b
 substituteArgs (x:xs) [] b = substituteArgs xs [] (replace x [] b)
@@ -339,7 +339,7 @@ skip s = many (noneOf "#") *> char '#' *> directive s
 processChar' s c Nothing = return c
 processChar' s c _ = do
     b <- many (noneOf "\n\r#")
-    pendBody (c:b)
+    pendBody ((c:b) ++ "\n")
     (char '#' *> directive s) <|> (restOfLine *> retnl)
 
 directive s =
