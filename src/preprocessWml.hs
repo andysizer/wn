@@ -55,8 +55,8 @@ data PreProcessorState = PreProcessorState
     , work :: ![WorkItem]
     , defines :: !DefMap
     , state :: ![LPPState]
-    , pendingDefine :: !DefSig
-    , pendingBody :: !String
+    , pendingDefine :: Maybe DefSig
+    , pendingBody :: ![String]
     }
         -- deriving (Eq, Show)
 
@@ -86,7 +86,7 @@ mkPPState p w ds s pd pb =
     }
 
 -- Initial Preprocessor State
-initState path = mkPPState (Just path) [] M.empty [Top] (DefSig "" []) []
+initState path = mkPPState (Just path) [] M.empty [Top] Nothing []
 
 -- utility functions for manipulation PState
 
@@ -302,7 +302,7 @@ substitute' Nothing pat _ = do
             case runParser preProcessWmlFile pps "" "" of
                 Right r -> r
                 Left e -> error $ show e
-    let pps = mkPPState (Just pat) ((Cont cont file) : (work st)) (defines st) [Top] (DefSig "" []) []
+    let pps = mkPPState (Just pat) ((Cont cont file) : (work st)) (defines st) [Top] Nothing []
     setState pps
     return ""
 substitute' (Just d) pat args = return $ substituteArgs  (defArgs (sig d)) args (body d)
@@ -382,19 +382,20 @@ pdefargs (x:xs) = (("{" ++ x ++ "}"): pdefargs xs)
 pendDefine s = do
     st <- getState
     setState $ mkPPState (path st) (work st) (defines st)
-                         (Defining : (state st)) s []
+                         (Defining : (state st)) (Just s) []
 
 pendBody b = do
     st <- getState
     setState $ mkPPState (path st) (work st) (defines st)
-                         (state st) (pendingDefine st) (pendingBody st ++ b ++ "\n")
+                         (state st) (pendingDefine st) (b : (pendingBody st))
 
 updateDefines = do
     st <- getState
-    s <- return $ pendingDefine st
-    nm <- return $ M.insert (defName s) (Define s (pendingBody st)) (defines st)
+    let (Just s) = pendingDefine st
+    let body = concat $ reverse $ ("\n" : (pendingBody st))
+    nm <- return $ M.insert (defName s) (Define s body) (defines st)
     setState $ mkPPState (path st) (work st) nm
-                         (state st) (pendingDefine st) (pendingBody st)
+                         (state st) Nothing []
 
 ifDirective s = do
     char 'f'
