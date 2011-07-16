@@ -40,6 +40,7 @@ tn =
 tn1 = "#define RAMP_BRIDGE S0 S1 S2 S3 S4 S5\n        map=\"\n,  {S0}\n{S5},   {S1}\n,  1\n{S4},   {S2}\n,  {S3}\"\n#enddef"
 tn2 = "#define foo x y # sdsd\nv1={x}\nv2={y}\n#enddef\n{foo 1 2}"
 
+{--
 test = runParser preProcessWml (initState "") "" 
 
 p = preProcess
@@ -47,4 +48,4 @@ p = preProcess
 f = "~C:\\Users\\andy\\Projects\\wesnoth-1.8.6\\data\\themes\\"
 fc = "~C:\\Users\\andy\\Projects\\wesnoth-1.8.6\\data\\core\\"
 f1 = "~C:\\Users\\andy\\Projects\\wesnoth-1.8.6\\data\\themes/macros.cfg"
-
+--}
