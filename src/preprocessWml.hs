@@ -70,7 +70,6 @@ data LPPState = Top
            | ProcessingElse
            | SkippingElse
            | Defining
-           | TextDomain
         deriving (Eq, Show)
 
 ----------------------------------------------------------------------------------
@@ -227,11 +226,6 @@ preProcessWml = do
     st <- getState
     preProcessWml' $ state st
 
-preProcessWml' s@(TextDomain :_ ) = do
-    popLPPState
-    st <- getState
-    cs <- preProcessWml' $ state st
-    return $ "textdomain" ++ cs
 preProcessWml' s = do
     cs <- getInput
     preProcessWml'' s cs
@@ -344,7 +338,7 @@ processChar' s c _ = do
 
 directive s =
         char ' ' *> comment
-    <|> try (string "textdomain") *> textDomain s
+    <|> try textDomain
     <|> try (char 'd' *> define s)
     <|> try (char 'i' *> ifDirective s)
     <|> try (char 'e' *> elseEnd s)
@@ -360,7 +354,14 @@ lineEnd = eol <|> (eof *> return '\n')
 
 restOfLine = many (noneOf "\n") <* eol -- lineEnd
 
-textDomain s = pushLPPState TextDomain s *> return '#'
+textDomain = do
+    r <- getInput
+    textDomain' "textdomain" r
+
+textDomain' [] _ = return '#'
+textDomain' (t:ts) (r:rs)
+    | t == r = textDomain' ts rs
+    | otherwise = fail $ "expecting " ++ [t]
 
 define s@(SkippingIf : _) =  skip s
 define s@(SkippingElse  :_) =  skip s
