@@ -177,14 +177,6 @@ lineInfo = do
                           ++ (show $ sourceLine pos) ++ " " 
                           ++ (show $ sourceColumn pos) ++ "\n"
 
-
--- preProcess consumes one of more source chars from the input and returns a string
--- The string can contain
--- 1. The character consumed
--- 2. A new line i.e. when skipping a failed If branch
--- 3. The result of a substition.
--- It is assumed preProcess will called repeatedly on given input and the results
--- concat'ed to form the result of the preProcess all the input.
 preProcessWml :: PreProcessorParser
 preProcessWml = do
     st <- getState
@@ -193,10 +185,12 @@ preProcessWml = do
 
 preProcessWml' :: Int -> String -> PreProcessorParser
 preProcessWml' 0 [] = return ""
-preProcessWml' _ [] = error "dangling #if"
+preProcessWml' _ [] = do
+    pos <- getPosition
+    error $ "dangling #if " ++ show pos
 preProcessWml' 0 ('{': _) = char '{' *> substitute '}'
 preProcessWml' sd ('#': _) = char '#' *> directive sd
-preProcessWml' 0 cs = do
+preProcessWml' 0 (_: cs) = do
     c <- anyChar
     st <- getState
     case pendingDefine st of
@@ -218,17 +212,18 @@ continue sd = do
 -- Substitution - this can be macro expansion or file inclusion
 -- the text '{xxxx}' gets substituted.
 -- NB. We have already consumed the leading '{'
--- We don't deal with nested substitions ....
 ----------------------------------------------------------------------
 substitute :: Char -> PreProcessorParser
 substitute r = do
-    items <- spaces *> manyTill substituteItem (noneOf [r])
+    items <- spaces *> manyTill substituteItem (char r)
     case items of
-        [] -> error "empty {} not allowed"
         (h:t) -> do { st <- getState;
                       d <- return $ M.lookup h (defines st);
                       substitute' d h t
                     }
+        [] -> do { pos <- getPosition;
+                   error $ "empty {} not allowed " ++ show pos
+                 }
 substituteItem :: PreProcessorParser
 substituteItem = 
         char '(' *> substituteItem' '(' ')'  
@@ -237,7 +232,7 @@ substituteItem =
 
 substituteItem' :: Char -> Char -> PreProcessorParser
 substituteItem' l r = do
-    items <- spaces *> manyTill substituteItem (noneOf [r])
+    items <- spaces *> manyTill substituteItem (char r)
     case items of
         [] -> error "empty {} not allowed"
         (h : t) -> return $ [l] ++ items ++ [r]
@@ -309,7 +304,7 @@ comment sd  = do
     restOfLine
     continue sd
 
-restOfLine = many (noneOf "\n") <* eol
+restOfLine = many (noneOf "\n")
 
 textDomain 0 = do
     r <- getInput
@@ -380,36 +375,40 @@ defCondition = symbol <* restOfLine
 
 symbol = spaces *> many (noneOf " \n\r\t")
 
-evalDefCondition s = do
-    st <-getState
-    case M.member s (defines st) of
+evalDefCondition c st =
+    case M.member c (defines st) of
         True -> return True
         _ -> return False
 
+ifhave sd = undefined
+ifnhave sd = undefined
+{--
 ifhave sd = if' sd "ave" haveCondition evalHaveCondition evalIf
 ifnhave sd = if' sd "ave" haveCondition evalHaveCondition evalIfNot
 
 haveCondition = undefined
 
 evalHaveCondition = undefined
+--}
 
+ifver sd = undefined
+ifnver sd = undefined
+{--
 ifver sd = if' sd "er" verCondition evalVerCondition evalIf
 ifnver sd = if' sd "er" verCondition evalVerCondition evalIfNot
-
-evalIf c e = do
-    r <- e c
-    return $ b2d r
-
-evalIfNot c e = do 
-    r <- e c
-    return $ b2d (not r)
-
-b2d True = 0
-b2d False = 1
 
 verCondition = undefined
 
 evalVerCondition = undefined
+--}
+
+evalIf :: String -> (String -> PreProcessorState -> Bool) -> PreProcessorState -> Int
+evalIf c e st = b2d $ e c st
+
+evalIfNot c e st = b2d $ not $ e c st
+
+b2d True = 0
+b2d False = 1
 
 ifn s =
         char 'd' *> ifndef s
@@ -419,10 +418,11 @@ ifn s =
 if' 0 r c p e = do
     string r
     exp <- c
-    skipd <- e exp p
     st <- getState
+    let skipd = e exp p st
     setState $ mkPPState (path st) (work st) (defines st) 
                          skipd (pendingDefine st) (pendingBody st)
+    error $ "#if' " ++ show skipd
     continue skipd
 if' sd _ _ _ _ = changeSkipDepth sd (+ 2)
 
@@ -474,8 +474,6 @@ undef' (k: _) = do
     nm <- return $ M.delete k (defines st)
     return $ mkPPState (path st) (work st) nm
                        (skippingDepth st) (pendingDefine st) (pendingBody st)
-
-eol = char '\n'
 
 -- A little utility
 pp x y = do { p <- preProcessWmlFile x; writeFileUtf8 y p;}
