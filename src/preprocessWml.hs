@@ -58,20 +58,6 @@ data PreProcessorState = PreProcessorState
     }
         -- deriving (Eq, Show)
 
-{-- !@! remove
-----------------------------------------------------------------------------------
--- PState
--- An enumeration of the possible states of the preprocessor processing a single file
-
-data LPPState = Top
-           | ProcessingIf
-           | SkippingIf
-           | ProcessingElse
-           | SkippingElse
-           | Defining
-        deriving (Eq, Show)
---}
-
 ----------------------------------------------------------------------------------
 -- constructor for PreProcessorState
 mkPPState p w ds s pd pb =
@@ -84,34 +70,10 @@ mkPPState p w ds s pd pb =
         pendingBody = pb
     }
 
+type PreProcessorParser = GenParser Char PreProcessorState String
+
 -- Initial Preprocessor State
 initState path = mkPPState (Just path) [] M.empty 0 Nothing []
-
-{-- !@! remove
--- utility functions for manipulation PState
-
-setLPPState s st = setState $ mkPPState (path st) (work st) (defines st) 
-                                        s (pendingDefine st) (pendingBody st)
-
-popLPPState = do
-    st <- getState
-    setLPPState (tail $ state st) st
-
-pushLPPState n s = do
-    st <- getState
-    setLPPState (n : s) st
-
--- next two used by #if directives
-
-pushIfState True s = pushLPPState ProcessingIf s
-pushIfState False s = pushLPPState SkippingIf s
-
-switchIfState (ProcessingIf : xs) st = setLPPState (SkippingElse : xs) st
-switchIfState (SkippingIf : (SkippingElse : xs)) st = setLPPState (SkippingElse : (SkippingElse : xs)) st
-switchIfState (SkippingIf : (SkippingIf : xs)) st = setLPPState (SkippingElse : (SkippingIf : xs)) st
-switchIfState (SkippingIf : xs) st = setLPPState (ProcessingElse : xs) st
-switchIfState _ _ = unexpected ": #else nested incorrectly"
---}
 
 ----------------------------------------------------------------------------------
 -- Types for dealing with #define
@@ -223,24 +185,34 @@ lineInfo = do
 -- 3. The result of a substition.
 -- It is assumed preProcess will called repeatedly on given input and the results
 -- concat'ed to form the result of the preProcess all the input.
-
+preProcessWml :: PreProcessorParser
 preProcessWml = do
     st <- getState
     cs <- getInput
     preProcessWml' (skippingDepth st) cs
 
-preProcessWml' _ [] = return ""
-preProcessWml' sd ('#': _) = char '#' *> directive sd
+preProcessWml' :: Int -> String -> PreProcessorParser
+preProcessWml' 0 [] = return ""
+preProcessWml' _ [] = error "dangling #if"
 preProcessWml' 0 ('{': _) = char '{' *> substitute '}'
-preProcessWml' 0 _ = preProcessWml''
-preProcessWml' _ _ = unexpected $ "preprocessor state"
-
-preProcessWml'' = do
-    c <- process
+preProcessWml' sd ('#': _) = char '#' *> directive sd
+preProcessWml' 0 cs = do
+    c <- anyChar
     st <- getState
-    cs <- getInput
-    rest <- preProcessWml' (skippingDepth st) cs  
-    return $ (c:rest)
+    case pendingDefine st of
+        Nothing ->  do { rest <- preProcessWml' 0 cs;
+                         return $ (c:rest)
+                       }
+        _ -> do { b <- many (noneOf "\n#");
+                  pendBody (c:b);
+                  inp <- getInput;
+                  preProcessWml' 0 inp
+                }
+preProcessWml' sd _ = skip sd
+
+continue sd = do
+    inp <- getInput
+    preProcessWml' sd inp
 
 ----------------------------------------------------------------------
 -- Substitution - this can be macro expansion or file inclusion
@@ -248,23 +220,24 @@ preProcessWml'' = do
 -- NB. We have already consumed the leading '{'
 -- We don't deal with nested substitions ....
 ----------------------------------------------------------------------
-
+substitute :: Char -> PreProcessorParser
 substitute r = do
-    items <- spaces *> manyTill substituteItem (char r)
+    items <- spaces *> manyTill substituteItem (noneOf [r])
     case items of
         [] -> error "empty {} not allowed"
         (h:t) -> do { st <- getState;
                       d <- return $ M.lookup h (defines st);
                       substitute' d h t
                     }
-
+substituteItem :: PreProcessorParser
 substituteItem = 
-        char '(' *> substituteItem' '(' ')' 
+        char '(' *> substituteItem' '(' ')'  
     <|> char '{' *> substituteItem' '{' '}' 
     <|> many (noneOf " ()}}\n\r\t") 
 
+substituteItem' :: Char -> Char -> PreProcessorParser
 substituteItem' l r = do
-    items <- spaces *> manyTill substituteItem (char r)
+    items <- spaces *> manyTill substituteItem (noneOf [r])
     case items of
         [] -> error "empty {} not allowed"
         (h : t) -> return $ [l] ++ items ++ [r]
@@ -277,10 +250,10 @@ substitute' Nothing pat _ = do
     st <- getState
     pos <- getPosition
     let file= sourceName pos
-    i <- getInput
+    inp <- getInput
     let preProcessWmlFile = do
             setPosition pos
-            setInput i
+            setInput inp
             preProcessWmlFile''
     let cont d = do 
             let pps = mkPPState (path st) (work st) d
@@ -303,8 +276,6 @@ substitute' (Just d) pat args = do
     cs <- preProcessWml' sd inp
     return $ scs' ++ cs
 
-
-
 substituteArgs [] _ b = b
 substituteArgs (x:xs) [] b = substituteArgs xs [] (replace x [] b)
 substituteArgs (x:xs) (y:ys) b = substituteArgs xs ys (replace x y b)
@@ -318,43 +289,36 @@ replace old new xs@(y:ys) =
 -----------------------------------------------
 -- non-substitution code 
 ----------------------------------------------
+skip :: Int -> PreProcessorParser
+skip sd = do
+    many (noneOf "#") 
+    inp <- getInput;
+    preProcessWml' sd inp
 
-process = do
-    st <- getState
-    c <- anyChar
-    case pendingDefine st of
-        Nothing -> return c
-        _ -> do { b <- many (noneOf "\n#");
-                  pendBody (c:b);
-                  (char '#' *> directive 0) <|> (restOfLine *> retnl)
-                }
-
-skip s = many (noneOf "#") *> char '#' *> directive s
-
+directive :: Int -> PreProcessorParser    
 directive sd =
-        char ' ' *> comment
-    <|> textDomain sd
+        textDomain sd
     <|> try (char 'd' *> define sd)
     <|> try (char 'i' *> ifDirective sd)
     <|> try (char 'e' *> elseEnd sd)
     <|> try (char 'u' *> undef sd)
-    <|> comment -- hmm seems like there isn't always a space first thing
+    <|> comment sd -- hmm seems like there isn't always a space first thing
     <?> "preprocessor directive"
 
-comment = do
+comment sd  = do
     restOfLine
-    retnl
+    continue sd
 
-lineEnd = eol <|> (eof *> return '\n')
-
-restOfLine = many (noneOf "\n") <* eol -- lineEnd
+restOfLine = many (noneOf "\n") <* eol
 
 textDomain 0 = do
     r <- getInput
     textDomain' "textdomain" r
 textDomain sd = skip sd
 
-textDomain' [] _ = return '#'
+textDomain' [] _ = do
+    rest <- continue 0
+    return ('#': rest)
 textDomain' (t:ts) (r:rs)
     | t == r = textDomain' ts rs
     | otherwise = fail $ "expecting " ++ [t]
@@ -363,7 +327,7 @@ define 0  = do
     string "efine"
     s <- defineSig
     pendDefine s
-    retnl
+    continue 0
 define sd =  skip sd
 
 defineSig = do
@@ -459,7 +423,7 @@ if' 0 r c p e = do
     st <- getState
     setState $ mkPPState (path st) (work st) (defines st) 
                          skipd (pendingDefine st) (pendingBody st)
-    retnl
+    continue skipd
 if' sd _ _ _ _ = changeSkipDepth sd (+ 2)
 
 changeSkipDepth sd f = do
@@ -467,7 +431,7 @@ changeSkipDepth sd f = do
     let skipd = f sd
     setState $ mkPPState (path st) (work st) (defines st) 
                          skipd (pendingDefine st) (pendingBody st)
-    skip skipd
+    continue skipd
 
 elseEnd sd =
         char 'l' *> else' sd
@@ -478,8 +442,7 @@ else' 0 = do
     st <- getState
     setState $ mkPPState (path st) (work st) (defines st) 
                          1 (pendingDefine st) (pendingBody st)
-    restOfLine
-    retnl
+    continue 1
 else' sd = changeSkipDepth sd (+ (-1))
 
 end sd =
@@ -488,22 +451,21 @@ end sd =
 
 endif 0 = do
     restOfLine
-    retnl
+    continue 0
 endif sd = changeSkipDepth sd (+ (-1))
 
 enddef 0 = do
     string "def"
     updateDefines
     restOfLine
-    retnl
+    continue 0
 enddef sd = skip sd
-
 
 undef 0 = do
     string "ndef"
     l <- restOfLine
     undef' $ words l
-    retnl
+    continue 0
 undef sd = skip sd
 
 undef' [] = unexpected ": #undef missing symbol"
@@ -512,8 +474,6 @@ undef' (k: _) = do
     nm <- return $ M.delete k (defines st)
     return $ mkPPState (path st) (work st) nm
                        (skippingDepth st) (pendingDefine st) (pendingBody st)
-
-retnl = return '\n'
 
 eol = char '\n'
 
