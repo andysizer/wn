@@ -9,4 +9,4 @@ module GameConfig
 
 userDataPath = ""
 
-systemDataPath = "d:\\Projects\\wesnoth\\wesnoth-1.8.6\\data\\"
+systemDataPath = "C:\\Users\\andy\\Projects\\wesnoth-1.8.6\\data\\"
