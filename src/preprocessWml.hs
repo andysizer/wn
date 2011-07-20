@@ -149,6 +149,7 @@ driver (PreProcessorState (Just path) work@((Cont _ file): _) defines sdepth pd 
     driver $ mkPPState Nothing (L.map File files ++ work) defines sdepth pd pb
 driver (PreProcessorState Nothing [] _ _ _ _) = return ""
 driver (PreProcessorState Nothing ((Cont cont _): _) defines _ _ _) = do
+    -- error $ "After inclusion"
     let (pps', result) = cont defines 
     result' <- driver pps'
     return $ result ++ result'
@@ -184,12 +185,12 @@ preProcessWml = do
     preProcessWml' (skippingDepth st) cs
 
 preProcessWml' :: Int -> String -> PreProcessorParser
-preProcessWml' 0 [] = return ""
-preProcessWml' _ [] = do
-    pos <- getPosition
-    error $ "dangling #if " ++ show pos
+preProcessWml' 0 [] = do
+    -- pos <- getPosition
+    -- error $ " reached eof @ " ++ show pos
+    return ""
 preProcessWml' 0 ('{': _) = char '{' *> substitute '}'
-preProcessWml' sd ('#': _) = char '#' *> directive sd
+preProcessWml' 0 ('#': _) = char '#' *> directive 0
 preProcessWml' 0 (_: cs) = do
     c <- anyChar
     st <- getState
@@ -197,11 +198,21 @@ preProcessWml' 0 (_: cs) = do
         Nothing ->  do { rest <- preProcessWml' 0 cs;
                          return $ (c:rest)
                        }
-        _ -> do { b <- many (noneOf "\n#");
-                  pendBody (c:b);
+        _ -> do { b <- many (noneOf "#");
+                  pendBody b;
                   inp <- getInput;
                   preProcessWml' 0 inp
                 }
+preProcessWml' _ [] = return ""
+{--
+preProcessWml' _ [] = do
+    pos <- getPosition
+    error $ "dangling #if " ++ show pos
+--}
+preProcessWml' sd ('#': _) = do
+    -- inp <- getInput
+    -- error $ "pp # " ++ show sd ++ inp
+    char '#' *> directive sd
 preProcessWml' sd _ = skip sd
 
 continue sd = do
@@ -226,9 +237,13 @@ substitute r = do
                  }
 substituteItem :: PreProcessorParser
 substituteItem = 
-        char '(' *> substituteItem' '(' ')'  
-    <|> char '{' *> substituteItem' '{' '}' 
-    <|> many (noneOf " ()}}\n\r\t") 
+        spaces *> bracketItem <* spaces
+    <|> braceItem <* spaces
+    <|> many (noneOf " (){}\n\r\t") <* spaces
+
+bracketItem = char '(' *> substituteItem' '(' ')' 
+
+braceItem = char '{' *> substituteItem' '{' '}'
 
 substituteItem' :: Char -> Char -> PreProcessorParser
 substituteItem' l r = do
@@ -249,6 +264,7 @@ substitute' Nothing pat _ = do
     let preProcessWmlFile = do
             setPosition pos
             setInput inp
+            -- error $ "continuing @ " ++ show pos ++ "\n" ++ inp
             preProcessWmlFile''
     let cont d = do 
             let pps = mkPPState (path st) (work st) d
@@ -268,6 +284,8 @@ substitute' (Just d) pat args = do
                    Left e -> fail $ show e
     let sd = skippingDepth st
     inp <- getInput
+    -- pos <- getPosition
+    --error $ "macro substitution @ " ++ show sd ++ " " ++ show pos ++ "\n" ++ scs' ++ "\n" ++ inp
     cs <- preProcessWml' sd inp
     return $ scs' ++ cs
 
@@ -288,15 +306,15 @@ skip :: Int -> PreProcessorParser
 skip sd = do
     many (noneOf "#") 
     inp <- getInput;
-    error $ "skip " ++ show sd ++ " " ++ inp
+    -- error $ "skip " ++ show sd ++ " " ++ inp
     preProcessWml' sd inp
 
-directive :: Int -> PreProcessorParser    
+directive :: Int -> PreProcessorParser
 directive sd =
         textDomain sd
     <|> try (char 'd' *> define sd)
     <|> try (char 'i' *> ifDirective sd)
-    <|> try (char 'e' *> (error $ "elseEnd" ++ show sd) *> elseEnd sd)
+    <|> try (char 'e' *> elseEnd sd)
     <|> try (char 'u' *> undef sd)
     <|> comment sd -- hmm seems like there isn't always a space first thing
     <?> "preprocessor directive"
@@ -307,16 +325,16 @@ comment sd  = do
 
 restOfLine = many (noneOf "\n")
 
-textDomain 0 = do
+textDomain sd = do
     r <- getInput
-    textDomain' "textdomain" r
-textDomain sd = skip sd
+    textDomain' "textdomain" r sd
 
-textDomain' [] _ = do
+textDomain' [] _ 0 = do
     rest <- continue 0
     return ('#': rest)
-textDomain' (t:ts) (r:rs)
-    | t == r = textDomain' ts rs
+textDomain' [] _ sd = skip sd
+textDomain' (t:ts) (r:rs) sd
+    | t == r = textDomain' ts rs sd
     | otherwise = fail $ "expecting " ++ [t]
 
 define 0  = do
@@ -354,7 +372,7 @@ pendBody b = do
 updateDefines = do
     st <- getState
     let (Just s) = pendingDefine st
-    let body = concat $ reverse $ ("\n" : (pendingBody st))
+    let body = dropWhile ((==) ' ') $ concat $ reverse $ (pendingBody st)
     nm <- return $ M.insert (defName s) (Define s body) (defines st)
     setState $ mkPPState (path st) (work st) nm
                          (skippingDepth st) Nothing []
@@ -417,9 +435,9 @@ if' 0 key cond eval sense = do
     let skipd = b2d skip
     setState $ mkPPState (path st) (work st) (defines st) 
                          skipd (pendingDefine st) (pendingBody st)
-    error $ "if " ++ show skipd
+    -- error $ "if " ++ show skipd
     continue skipd
-if' sd _ _ _ _ = changeSkipDepth $ sd + 2
+if' sd _ _ _ _ = changeSkipDepth $ sd + 1
 
 b2d True = 0
 b2d False = 1
@@ -431,19 +449,12 @@ changeSkipDepth skipd= do
     continue skipd
 
 elseEnd sd =
-        char 'l' *> (error $ "else @ " ++ show sd) *> else' sd
+        char 'l' *> string "se" *> else' sd
     <|> string "nd" *> end sd
 
-else' 0 = do
-    error "else - but shouldn't be here!!!"
-    string "se"
-    st <- getState
-    setState $ mkPPState (path st) (work st) (defines st) 
-                         1 (pendingDefine st) (pendingBody st)
-    continue 1
-else' sd = do
-    error $ "#else' " ++ show sd
-    changeSkipDepth $ sd - 1
+else' 0 = changeSkipDepth 1
+else' 1 = changeSkipDepth $ 0
+else' sd = skip sd
 
 end sd =
         char 'i' *> endif sd
@@ -451,9 +462,11 @@ end sd =
 
 endif 0 = do
     restOfLine
+    -- inp <- getInput
+    -- error $ "#endif' " ++ show 0 ++ " " ++ inp
     continue 0
 endif sd = do
-    error $ "#endif' " ++ show sd
+    -- error $ "#endif' " ++ show sd
     changeSkipDepth $ sd - 1
 
 enddef 0 = do
@@ -462,7 +475,7 @@ enddef 0 = do
     restOfLine
     continue 0
 enddef sd = do
-    error $ "#enddef' " ++ show sd
+    -- error $ "#enddef' " ++ show sd
     skip sd
 
 undef 0 = do
