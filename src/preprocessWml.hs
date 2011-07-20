@@ -120,6 +120,8 @@ checkFile _ _ = []
 
 expandPath'' _ ".." = return []
 expandPath'' _ "." = return []
+expandPath'' _ "images" = return []
+expandPath'' _ "sounds" = return []
 expandPath'' p f = expandPath' $ normalise $ p </> f
 
 expandDirectory filePath = do
