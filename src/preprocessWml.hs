@@ -288,6 +288,7 @@ skip :: Int -> PreProcessorParser
 skip sd = do
     many (noneOf "#") 
     inp <- getInput;
+    error $ "skip " ++ show sd ++ " " ++ inp
     preProcessWml' sd inp
 
 directive :: Int -> PreProcessorParser    
@@ -295,7 +296,7 @@ directive sd =
         textDomain sd
     <|> try (char 'd' *> define sd)
     <|> try (char 'i' *> ifDirective sd)
-    <|> try (char 'e' *> elseEnd sd)
+    <|> try (char 'e' *> (error $ "elseEnd" ++ show sd) *> elseEnd sd)
     <|> try (char 'u' *> undef sd)
     <|> comment sd -- hmm seems like there isn't always a space first thing
     <?> "preprocessor directive"
@@ -368,23 +369,20 @@ ifDirective' sd =
     <|> char 'v' *> ifver sd
     <|> char 'n' *> ifn sd
 
-ifdef sd = if' sd "ef" defCondition evalDefCondition evalIf
-ifndef sd = if' sd "ef" defCondition evalDefCondition evalIfNot
+ifdef sd = if' sd "ef" defCondition evalDefCondition id
+ifndef sd = if' sd "ef" defCondition evalDefCondition not
 
 defCondition = symbol <* restOfLine
 
 symbol = spaces *> many (noneOf " \n\r\t")
 
-evalDefCondition c st =
-    case M.member c (defines st) of
-        True -> return True
-        _ -> return False
+evalDefCondition c st = M.member c (defines st)
 
 ifhave sd = undefined
 ifnhave sd = undefined
 {--
-ifhave sd = if' sd "ave" haveCondition evalHaveCondition evalIf
-ifnhave sd = if' sd "ave" haveCondition evalHaveCondition evalIfNot
+ifhave sd = if' sd "ave" haveCondition evalHaveCondition (not.not)
+ifnhave sd = if' sd "ave" haveCondition evalHaveCondition not
 
 haveCondition = undefined
 
@@ -394,56 +392,58 @@ evalHaveCondition = undefined
 ifver sd = undefined
 ifnver sd = undefined
 {--
-ifver sd = if' sd "er" verCondition evalVerCondition evalIf
-ifnver sd = if' sd "er" verCondition evalVerCondition evalIfNot
+ifver sd = if' sd "er" verCondition evalVerCondition not.not
+ifnver sd = if' sd "er" verCondition evalVerCondition not
 
 verCondition = undefined
 
 evalVerCondition = undefined
 --}
 
-evalIf :: String -> (String -> PreProcessorState -> Bool) -> PreProcessorState -> Int
-evalIf c e st = b2d $ e c st
-
-evalIfNot c e st = b2d $ not $ e c st
-
-b2d True = 0
-b2d False = 1
-
 ifn s =
         char 'd' *> ifndef s
     <|> char 'h' *> ifnhave s
     <|> char 'v' *> ifnver s
 
-if' 0 r c p e = do
-    string r
-    exp <- c
+type IfConditionParser = PreProcessorParser
+type IfConditionEvaluator = String -> PreProcessorState -> Bool
+type Sense = Bool -> Bool
+
+if' :: Int -> String -> IfConditionParser -> IfConditionEvaluator -> Sense -> PreProcessorParser
+if' 0 key cond eval sense = do
+    c <- string key *> cond 
     st <- getState
-    let skipd = e exp p st
+    let skip = sense $ eval c st
+    let skipd = b2d skip
     setState $ mkPPState (path st) (work st) (defines st) 
                          skipd (pendingDefine st) (pendingBody st)
-    error $ "#if' " ++ show skipd
+    error $ "if " ++ show skipd
     continue skipd
-if' sd _ _ _ _ = changeSkipDepth sd (+ 2)
+if' sd _ _ _ _ = changeSkipDepth $ sd + 2
 
-changeSkipDepth sd f = do
+b2d True = 0
+b2d False = 1
+
+changeSkipDepth skipd= do
     st <- getState
-    let skipd = f sd
     setState $ mkPPState (path st) (work st) (defines st) 
                          skipd (pendingDefine st) (pendingBody st)
     continue skipd
 
 elseEnd sd =
-        char 'l' *> else' sd
+        char 'l' *> (error $ "else @ " ++ show sd) *> else' sd
     <|> string "nd" *> end sd
 
 else' 0 = do
+    error "else - but shouldn't be here!!!"
     string "se"
     st <- getState
     setState $ mkPPState (path st) (work st) (defines st) 
                          1 (pendingDefine st) (pendingBody st)
     continue 1
-else' sd = changeSkipDepth sd (+ (-1))
+else' sd = do
+    error $ "#else' " ++ show sd
+    changeSkipDepth $ sd - 1
 
 end sd =
         char 'i' *> endif sd
@@ -452,14 +452,18 @@ end sd =
 endif 0 = do
     restOfLine
     continue 0
-endif sd = changeSkipDepth sd (+ (-1))
+endif sd = do
+    error $ "#endif' " ++ show sd
+    changeSkipDepth $ sd - 1
 
 enddef 0 = do
     string "def"
     updateDefines
     restOfLine
     continue 0
-enddef sd = skip sd
+enddef sd = do
+    error $ "#enddef' " ++ show sd
+    skip sd
 
 undef 0 = do
     string "ndef"
