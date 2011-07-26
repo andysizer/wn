@@ -9,7 +9,7 @@ module GameConfig
 )
     where
 
-userDataPath = ""
+userDataPath = "D:\\Projects\\wesnoth\\wesnoth-1.8.6\\userdata\\"
 
 systemDataPath = "d:\\Projects\\wesnoth\\wesnoth-1.8.6\\data\\"
 

@@ -6,9 +6,15 @@ module FileSystem
 , FileNameOption(..)
 , FileFilterOption(..)
 , FileReorderOption(..)
+, dataTreeCheckSum
 , getWmlLocation
+, getFileSize
+, directoryName
+, fileName
 ) 
     where
+
+import Control.Monad
 
 import System.IO 
 import System.Directory
@@ -17,6 +23,7 @@ import System.Time
 import System.Info
 
 import Data.List as L
+import Data.Maybe
 
 import GameConfig
 
@@ -53,40 +60,39 @@ mainCfgFilename = "_main.cfg"
 finalCfgFilename = "_final.cfg"
 initialCfgFilename = "_initial.cfg"
 
-getFilesInDir :: FilePath ->  Bool -> Bool -> FileNameOption -> FileFilterOption -> FileReorderOption -> Bool 
+getFilesInDir :: FilePath ->  Bool -> Bool -> FileNameOption -> FileFilterOption -> FileReorderOption -> Maybe CheckSumResult
                  -> IO ([FilePath],[FilePath], Maybe CheckSumResult) 
-getFilesInDir [] True dirs nameOption filterOption DoReorder needCheckSum = 
-    tryMainCfg [] mainCfgFilename dirs nameOption filterOption needCheckSum
-getFilesInDir dir@(c:_) True dirs nameOption filterOption DoReorder needCheckSum
+getFilesInDir [] True dirs nameOption filterOption DoReorder checkSum = 
+    tryMainCfg [] mainCfgFilename dirs nameOption filterOption checkSum
+getFilesInDir dir@(c:_) True dirs nameOption filterOption DoReorder checkSum
     | c == dirSep = do
         let path = normalise $ combine dir mainCfgFilename
-        tryMainCfg dir path dirs nameOption filterOption needCheckSum
+        tryMainCfg dir path dirs nameOption filterOption checkSum
     | otherwise = do
         let path = normalise $ combine gameConfigPath (combine dir mainCfgFilename)
-        tryMainCfg dir path dirs nameOption filterOption needCheckSum
-getFilesInDir dir files dirs nameOption filterOption reorderOption  needCheckSum =
-    getFilesInDir' path files dirs nameOption filterOption reorderOption needCheckSum
-    where path = case dir of
-                     (dirSep : _ ) -> dir
-                     _ -> normalise $ combine gameConfigPath dir
+        tryMainCfg dir path dirs nameOption filterOption checkSum
+getFilesInDir dir@(c:_) files dirs nameOption filterOption reorderOption  checkSum
+    | c == dirSep = do
+        getFilesInDir' dir files dirs nameOption filterOption reorderOption checkSum
+    | otherwise = do
+        let path = normalise $ combine gameConfigPath dir
+        getFilesInDir' path files dirs nameOption filterOption reorderOption checkSum
 
-
-tryMainCfg dir path dirs nameOption filterOption needCheckSum = do
+tryMainCfg dir path dirs nameOption filterOption cs = do
     mainExists <- doesFileExist path
-    let cs = if needCheckSum then Just mkCheckSumResult else Nothing
     if mainExists
     then case nameOption of
              EntireFilePath -> return ([path],[], cs)
              FileNameOnly -> return ([mainCfgFilename],[], cs)
-    else getFilesInDir' dir True dirs nameOption filterOption DoReorder needCheckSum
+    else getFilesInDir' dir True dirs nameOption filterOption DoReorder cs
 
-getFilesInDir' path files dirs nameOption filterOption reorderOption  needCheckSum = do
+getFilesInDir' path files dirs nameOption filterOption reorderOption  cs = do
     let addFile f (fs,ds,cs) = do
         let fs' = case nameOption of
                       EntireFilePath -> ( (normalise $ combine path f) : fs)
                       _ -> (f : fs)
         cs' <- case cs of
-                   Just x -> if needCheckSum then updateCheckSum (normalise $ combine path f) x else return cs
+                   Just x -> updateCheckSum (normalise $ combine path f) x
                    _ -> return cs
         return (fs', ds, cs')
     let maybeReorder d a@(fs,ds,cs) = do
@@ -121,15 +127,30 @@ getFilesInDir' path files dirs nameOption filterOption reorderOption  needCheckS
            else addDir e r'
         }
     contents <- getDirectoryContents path
-    let cs = if needCheckSum then Just mkCheckSumResult else Nothing
     let acc = return ([],[],cs)
-    (fs, ds, cs) <- foldr addEntry acc contents
-    return $ (reorderFiles reorderOption fs, sort ds, cs)
+    (fs, ds, cs') <- foldr addEntry acc contents
+    return $ (reorderFiles reorderOption fs, sort ds, cs')
                                       
 reorderFiles DontReorder fs = sort fs
 reorderFiles DoReorder fs = i ++ sort fs'' ++ f
     where (i,fs') = L.partition ((==) initialCfgFilename) fs
           (f,fs'') = L.partition ((==) finalCfgFilename) fs'
+
+dataTreeCheckSum cs = do
+    let cs' = case cs of
+                  Nothing -> Just mkCheckSumResult
+                  _ -> cs
+    cs'' <- fileTreeCheckSum cs' "data/"
+    cs''' <- fileTreeCheckSum cs'' (normalise $ combine userDataPath "data")
+    Lg.log "FS" ("calculated data tree checksum: " 
+                 ++ (show $ numFiles $ fromJust cs''') ++ " files; "
+                 ++ (show $ sumSize $ fromJust cs''') ++ " bytes\n")
+    return cs'''
+
+fileTreeCheckSum Nothing p = return Nothing
+fileTreeCheckSum cs p = do
+    (_,ds,cs') <- getFilesInDir p False True EntireFilePath SkipMediaDir DontReorder cs
+    foldM fileTreeCheckSum cs' ds
 
 getWmlLocation :: FilePath -> FilePath -> IO FilePath
 getWmlLocation filename currentDir = do
@@ -202,3 +223,8 @@ exeext = case os of
              _ -> ""
 
 getProgramInvocation p = normalise $ combine wesnothProgDir (addExtension p exeext)
+
+directoryName = takeDirectory
+
+fileName = takeFileName
+
