@@ -4,7 +4,6 @@ module PreProcessWml
 (
   preProcessWmlFile
 , initState
-, mkPPState
 , PreProcessorState(..)
 , WorkItem(..)
 ) 
@@ -15,36 +14,12 @@ import Control.Monad
 import Data.List as L
 import Data.Map as M
 
-import System.IO 
-import System.Directory
-import System.FilePath
-
 import Text.Parsec.Prim (unexpected)
 import Text.ParserCombinators.Parsec.Prim (getState, setState)
 
 import ApplicativeParsec
 
-import FileSystem
-import Utf8ReadWriteFile
-import Logging as Wesnoth
-
-
-----------------------------------------------------------------------------------
--- PreProcessorState
--- Holds the state of the preprocessor
--- state :       
---   describes what the preprocess is doing e.g. processing #if or #define.See PState.
---   It is a stack, implemented as list, that reflects conditional nesting.
---   Many of the parsing functions match against the top of the stack
---   NB it is never empty (see initState) so 'head' and 'tail' are always safe.
--- defines:
---   a map from name to a Define structure that describes a textual substitution
--- pendingDefine:
---   Only valid in Defining State. Contains the 'signature' of the #define being
---   processed.
--- pendingBody: 
---   Only valid in Defining State. Accumulates the body of the #define being
---   processed.
+import WesConfig as WCgf
 
 data WorkItem =
      File !FilePath
@@ -55,28 +30,25 @@ data PreProcessorState = PreProcessorState
       path :: Maybe FilePath
     , work :: ![WorkItem]
     , defines :: !DefMap
+    , domain :: !String
     , skippingDepth :: !Int
     , pendingDefine :: Maybe DefSig
     , pendingBody :: ![String]
     }
         -- deriving (Eq, Show)
 
-----------------------------------------------------------------------------------
--- constructor for PreProcessorState
-mkPPState p w ds s pd pb =
-    PreProcessorState {
-        path = p,
-        work = w,
-        defines = ds,
-        skippingDepth = s,
-        pendingDefine = pd,
-        pendingBody = pb
-    }
+updatePath st p = PreProcessorState p (work st) (defines st) (domain st) (skippingDepth st) (pendingDefine st) (pendingBody st)
+updateWork st w = PreProcessorState (path st) w (defines st) (domain st) (skippingDepth st) (pendingDefine st) (pendingBody st)
+updateDefineMap st nm = PreProcessorState (path st) (work st) nm (domain st) (skippingDepth st) (pendingDefine st) (pendingBody st) 
+updateDomain st d = PreProcessorState (path st) (work st) (defines st) d (skippingDepth st) (pendingDefine st) (pendingBody st) 
+updateSDepth st d = PreProcessorState (path st) (work st) (defines st) (domain st) d (pendingDefine st) (pendingBody st) 
+updateDefine st d = PreProcessorState (path st) (work st) (defines st) (domain st) (skippingDepth st) d []
+updateBody st b = PreProcessorState (path st) (work st) (defines st) (domain st) (skippingDepth st) (pendingDefine st) b 
 
 type PreProcessorParser = GenParser Char PreProcessorState String
 
 -- Initial Preprocessor State
-initState path = mkPPState (Just path) [] M.empty 0 Nothing []
+initState path = PreProcessorState (Just path) [] M.empty WCgf.package 0 Nothing []
 
 ----------------------------------------------------------------------------------
 -- Types for dealing with #define
@@ -94,65 +66,16 @@ data DefSig = DefSig
     {
       defName :: !String
     , defArgs :: ![String]
+    , defDomain :: !String
     }
         deriving (Eq, Show)
 
------------------------------------------------------------
------------------------------------------------------------------------------------
--- expand a path according to the following rules from
--- http://wiki.wesnoth.org/PreprocessorRef
--- 1. pathname - a path under the wesnoth data/ subdirectory
--- 2. ~pathname - a path relative to the data/ subdirectory of the user's data directory
--- 3. ./pathname - a path relative to the directory containing the file in which the pattern appears.
-
-expandPath _ "" = do
-    Wesnoth.log "ERR" "empty path given to expandPath\n"
-    return []
-expandPath currentDir path = do
-    let expandDir = do
-        (fs,_,_) <- getFilesInDir path True False EntireFilePath SkipMediaDir DoReorder Nothing
-        return fs
-    let expandPath' = do
-        p <-  getWmlLocation path currentDir
-        expandPath currentDir p
-    let expandFile = do
-        isFile <- doesFileExist path
-        if isFile
-        then return [path] 
-        else expandPath'
-    isDir <- isDirectory path
-    if isDir
-    then expandDir
-    else expandFile
-    
-preProcessWmlFile f = driver $ initState f
-
-driver :: PreProcessorState -> IO String
-driver (PreProcessorState (Just path) [] defines sdepth pd pb) = do
-    files <- expandPath "" path
-    driver $ mkPPState Nothing (L.map File files) defines sdepth pd pb
-driver (PreProcessorState (Just path) work@((Cont _ file): _) defines sdepth pd pb) = do
-    files <- expandPath file path
-    driver $ mkPPState Nothing (L.map File files ++ work) defines sdepth pd pb
-driver (PreProcessorState Nothing [] _ _ _ _) = return ""
-driver (PreProcessorState Nothing ((Cont cont _): _) defines _ _ _) = do
-    -- error $ "After inclusion"
-    let (pps', result) = cont defines 
-    result' <- driver pps'
-    return $ result ++ result'
-driver (PreProcessorState Nothing ((File file): work) defines sdepth pd pb) = do
-    s <- readFileUtf8 file
-    let pps = mkPPState Nothing work defines sdepth pd pb
-    let (pps', result) = preProcessWmlFile' pps file s
-    result' <- driver pps'
-    return $ result ++ result'
-
-preProcessWmlFile' st n s = do
-    case runParser preProcessWmlFile'' st n s of
+preProcessWmlFile st n s = do
+    case runParser preProcessWmlFile' st n s of
         Right r -> r
         Left e -> error $ show e
 
-preProcessWmlFile'' = do
+preProcessWmlFile' = do
     l <- lineInfo
     r <- preProcessWml
     st <- getState
@@ -160,6 +83,7 @@ preProcessWmlFile'' = do
 
 lineInfo = do
     pos <- getPosition
+    st <- getState
     return $ "\n#line \"" ++ (sourceName pos) ++ "\" " 
                           ++ (show $ sourceLine pos) ++ " " 
                           ++ (show $ sourceColumn pos) ++ "\n"
@@ -241,28 +165,25 @@ substitute' Nothing pat _ = do
     let preProcessWmlFile = do
             setPosition pos
             setInput inp
-            -- error $ "continuing @ " ++ show pos ++ "\n" ++ inp
-            preProcessWmlFile''
+            preProcessWmlFile'
     let cont d = do 
-            let pps = mkPPState (path st) (work st) d
-                                (skippingDepth st) (pendingDefine st) (pendingBody st)
+            let pps = updateDefineMap st d
+            let td = "#textdomain " ++ (domain st)
             case runParser preProcessWmlFile pps "" "" of
-                Right r -> r
+                Right (p, r) -> (p, td ++ r)
                 Left e -> error $ show e
-    let pps = mkPPState (Just pat) ((Cont cont file) : (work st)) (defines st) 0 Nothing []
+    let pps = PreProcessorState (Just pat) ((Cont cont file) : (work st)) (defines st) (domain st) 0 Nothing []
     setState pps
     return ""
 substitute' (Just d) pat args = do
     let scs = substituteArgs  (defArgs (sig d)) args (body d)
     st <- getState
-    let pps = mkPPState Nothing [] (defines st) 0 Nothing []
+    let pps = PreProcessorState Nothing [] (defines st) (domain st) 0 Nothing []
     let scs' = case runParser preProcessWml pps "" scs of
                    Right r -> r
                    Left e -> fail $ show e
     let sd = skippingDepth st
     inp <- getInput
-    -- pos <- getPosition
-    --error $ "macro substitution @ " ++ show sd ++ " " ++ show pos ++ "\n" ++ scs' ++ "\n" ++ inp
     cs <- preProcessWml' sd inp
     return $ scs' ++ cs
 
@@ -283,12 +204,11 @@ skip :: Int -> PreProcessorParser
 skip sd = do
     many (noneOf "#") 
     inp <- getInput;
-    -- error $ "skip " ++ show sd ++ " " ++ inp
     preProcessWml' sd inp
 
 directive :: Int -> PreProcessorParser
 directive sd =
-        textDomain sd
+        try (char 't' *> textDomain sd)
     <|> try (char 'd' *> define sd)
     <|> try (char 'i' *> ifDirective sd)
     <|> try (char 'e' *> elseEnd sd)
@@ -302,17 +222,14 @@ comment sd  = do
 
 restOfLine = many (noneOf "\n")
 
-textDomain sd = do
-    r <- getInput
-    textDomain' "textdomain" r sd
-
-textDomain' [] _ 0 = do
+textDomain 0 = do
+    string "extdomain"
+    s <- symbol
+    st <- getState
+    setState $ updateDomain st s
     rest <- continue 0
-    return ('#': rest)
-textDomain' [] _ sd = skip sd
-textDomain' (t:ts) (r:rs) sd
-    | t == r = textDomain' ts rs sd
-    | otherwise = fail $ "expecting " ++ [t]
+    return $ "#textdomain " ++ s ++ rest
+textDomain sd = skip sd
 
 define 0  = do
     string "efine"
@@ -324,7 +241,8 @@ define sd =  skip sd
 defineSig = do
     l <- restOfLine
     (name, args) <- pdefsig l
-    return (DefSig name args)
+    st <- getState
+    return (DefSig name args (domain st))
 
 pdefsig l = pdefsig' $ words l
 
@@ -338,20 +256,18 @@ pdefargs (x:xs) = (("{" ++ x ++ "}"): pdefargs xs)
 
 pendDefine s = do
     st <- getState
-    setState $ mkPPState (path st) (work st) (defines st)
-                         (skippingDepth st) (Just s) []
+    setState $ updateDefine st (Just s)
 
 pendBody b = do
     st <- getState
-    setState $ mkPPState (path st) (work st) (defines st)
-                         (skippingDepth st) (pendingDefine st) (b : (pendingBody st))
+    setState $ updateBody st (b : (pendingBody st))
 
 updateDefines = do
     st <- getState
     let (Just s) = pendingDefine st
     let body = dropWhile ((==) ' ') $ concat $ reverse $ (pendingBody st)
     nm <- return $ M.insert (defName s) (Define s body) (defines st)
-    setState $ mkPPState (path st) (work st) nm
+    setState $ PreProcessorState (path st) (work st) nm (domain st)
                          (skippingDepth st) Nothing []
 
 ifDirective sd = do
@@ -410,9 +326,7 @@ if' 0 key cond eval sense = do
     st <- getState
     let skip = sense $ eval c st
     let skipd = b2d skip
-    setState $ mkPPState (path st) (work st) (defines st) 
-                         skipd (pendingDefine st) (pendingBody st)
-    -- error $ "if " ++ show skipd
+    setState $ updateSDepth st skipd
     continue skipd
 if' sd _ _ _ _ = changeSkipDepth $ sd + 1
 
@@ -421,8 +335,7 @@ b2d False = 1
 
 changeSkipDepth skipd= do
     st <- getState
-    setState $ mkPPState (path st) (work st) (defines st) 
-                         skipd (pendingDefine st) (pendingBody st)
+    setState $ updateSDepth st skipd
     continue skipd
 
 elseEnd sd =
@@ -434,26 +347,20 @@ else' 1 = changeSkipDepth $ 0
 else' sd = skip sd
 
 end sd =
-        char 'i' *> endif sd
+        char 'i' *> char 'f' *> endif sd
     <|> enddef sd
 
 endif 0 = do
     restOfLine
-    -- inp <- getInput
-    -- error $ "#endif' " ++ show 0 ++ " " ++ inp
     continue 0
-endif sd = do
-    -- error $ "#endif' " ++ show sd
-    changeSkipDepth $ sd - 1
+endif sd = changeSkipDepth $ sd - 1
 
 enddef 0 = do
     string "def"
     updateDefines
     restOfLine
     continue 0
-enddef sd = do
-    -- error $ "#enddef' " ++ show sd
-    skip sd
+enddef sd = skip sd
 
 undef 0 = do
     string "ndef"
@@ -466,6 +373,5 @@ undef' [] = unexpected ": #undef missing symbol"
 undef' (k: _) = do
     st <- getState
     nm <- return $ M.delete k (defines st)
-    return $ mkPPState (path st) (work st) nm
-                       (skippingDepth st) (pendingDefine st) (pendingBody st)
+    return $ updateDefineMap st nm
 

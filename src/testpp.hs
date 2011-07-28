@@ -3,7 +3,8 @@
 import System.Environment
 import System.Exit
 import ApplicativeParsec
-import PreProcessWml
+import PreProcessWmlIO
+import Utf8ReadWriteFile
 
 main = do
     args <- getArgs
@@ -19,6 +20,8 @@ doIt _ = do
 usage = do
     p <- getProgName
     print ("Usage: " ++ p ++ " input [outfile]")
+
+pp x y = do { p <- preProcessWmlFile x; writeFileUtf8 y p;}
     
     
 
