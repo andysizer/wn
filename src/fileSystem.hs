@@ -9,6 +9,7 @@ module FileSystem
 , dataTreeCheckSum
 , getWmlLocation
 , getFileSize
+, isDirectory
 , directoryName
 , fileName
 ) 
@@ -27,7 +28,7 @@ import Data.Maybe
 
 import GameConfig
 
-import Logging as Lg
+import Logging as Wesnoth
 
 data FileNameOption = EntireFilePath | FileNameOnly
 data FileFilterOption = NoFilter | SkipMediaDir
@@ -64,15 +65,15 @@ getFilesInDir :: FilePath ->  Bool -> Bool -> FileNameOption -> FileFilterOption
                  -> IO ([FilePath],[FilePath], Maybe CheckSumResult) 
 getFilesInDir [] True dirs nameOption filterOption DoReorder checkSum = 
     tryMainCfg [] mainCfgFilename dirs nameOption filterOption checkSum
-getFilesInDir dir@(c:_) True dirs nameOption filterOption DoReorder checkSum
-    | c == dirSep = do
+getFilesInDir dir True dirs nameOption filterOption DoReorder checkSum
+    | isWmlAbsolute dir = do
         let path = normalise $ combine dir mainCfgFilename
         tryMainCfg dir path dirs nameOption filterOption checkSum
     | otherwise = do
         let path = normalise $ combine gameConfigPath (combine dir mainCfgFilename)
         tryMainCfg dir path dirs nameOption filterOption checkSum
-getFilesInDir dir@(c:_) files dirs nameOption filterOption reorderOption  checkSum
-    | c == dirSep = do
+getFilesInDir dir files dirs nameOption filterOption reorderOption  checkSum
+    | isWmlAbsolute dir = do
         getFilesInDir' dir files dirs nameOption filterOption reorderOption checkSum
     | otherwise = do
         let path = normalise $ combine gameConfigPath dir
@@ -142,7 +143,7 @@ dataTreeCheckSum cs = do
                   _ -> cs
     cs'' <- fileTreeCheckSum cs' "data/"
     cs''' <- fileTreeCheckSum cs'' (normalise $ combine userDataPath "data")
-    Lg.log "FS" ("calculated data tree checksum: " 
+    Wesnoth.log "FS" ("calculated data tree checksum: " 
                  ++ (show $ numFiles $ fromJust cs''') ++ " files; "
                  ++ (show $ sumSize $ fromJust cs''') ++ " bytes\n")
     return cs'''
@@ -154,15 +155,15 @@ fileTreeCheckSum cs p = do
 
 getWmlLocation :: FilePath -> FilePath -> IO FilePath
 getWmlLocation filename currentDir = do
-    Lg.log "DBG" ("Looking for '" ++ filename ++ "'.\n");
+    Wesnoth.log "DBG" ("Looking for '" ++ filename ++ "'.\n");
     getWmlLocation' filename currentDir
 
 getWmlLocation' "" _ = do
-    Lg.log "FS" "Invalid filename\n"
+    Wesnoth.log "FS" "Invalid filename\n"
     return ""
 getWmlLocation' filename@(c:cs) currentDir
     | ".." `isInfixOf` filename = do
-        Lg.log "ERR" ("Illegal path '" ++ filename ++ "' (\"..\" not allowed).\n")
+        Wesnoth.log "ERR" ("Illegal path '" ++ filename ++ "' (\"..\" not allowed).\n")
         return ""
     | c == '~' = do
         let fn = normalise $ combine userDataPath (combine "data" cs)
@@ -171,7 +172,7 @@ getWmlLocation' filename@(c:cs) currentDir
         case stripPrefix "./" filename of
             Just f -> checkExists $ normalise $ combine currentDir f
             _ -> do
-                 {  Lg.log "ERR" "failed to strip prefix"; -- should never get this
+                 {  Wesnoth.log "ERR" "failed to strip prefix"; -- should never get this
                     return ""
                  }
     | otherwise = do
@@ -180,43 +181,38 @@ getWmlLocation' filename@(c:cs) currentDir
 
 checkExists :: FilePath -> IO FilePath
 checkExists fn = do
-    Lg.log "FS" ("trying '" ++ fn ++ "'\n")
+    Wesnoth.log "FS" ("trying '" ++ fn ++ "'\n")
     fExists <- doesFileExist fn
     if fExists
     then do
-         { Lg.log "FS" ("found: '" ++ fn ++ "'\n");
+         { Wesnoth.log "FS" ("found: '" ++ fn ++ "'\n");
            return fn
          }
     else do 
          { dExists <- doesDirectoryExist fn;
            if dExists
            then do
-                { Lg.log "FS" ("found: '" ++ fn ++ "'\n");
+                { Wesnoth.log "FS" ("found: '" ++ fn ++ "'\n");
                   return fn
                 }
            else do
-                { Lg.log "FS" "not found\n";
+                { Wesnoth.log "FS" "not found\n";
                   return ""
                 }
          }
 
-getShortWmlPath :: FilePath -> IO FilePath
-getShortWmlPath fn
-    | checkPathPrefix userDataPath fn = 
-        shortenPath userDataPath fn "~"
-    | checkPathPrefix gameConfigPath fn =
-        shortenPath gameConfigPath fn ""
-    | otherwise = do return fn
+getShortWmlPath :: FilePath -> FilePath
+getShortWmlPath fn = sfn
+    where sfn = case shortenPath userDataPath fn "~" of
+                    Just f -> f
+                    _ -> case shortenPath gameConfigPath fn "" of
+                             Just f -> f
+                             _ -> fn
 
-checkPathPrefix p fn = (normalise $ combine p "data/") `isPrefixOf` (normalise fn)
-
-shortenPath p fn pre = do
+shortenPath p fn pre =
     case stripPrefix (normalise $ combine p "data/") (normalise fn) of
-        Just f -> return $ pre ++ f
-        _ -> do
-             {  Lg.log "ERR" "failed to strip prefix"; -- should never get this
-                return fn
-             }
+        Just f -> Just $ pre ++ f
+        e -> e
 
 exeext = case os of
              "mingw32" -> "exe"
@@ -225,6 +221,25 @@ exeext = case os of
 getProgramInvocation p = normalise $ combine wesnothProgDir (addExtension p exeext)
 
 directoryName = takeDirectory
+
+isWinWmlAbsolute "" = False
+isWinWmlAbsolute d@(c:cs)
+    | c == '\\' = True
+    | c == '/' = True
+    | ":\\" `isPrefixOf` cs = True
+    | ":/" `isPrefixOf` cs = True
+    | otherwise = False
+
+isWmlAbsolute = case os of
+             "mingw32" -> isWinWmlAbsolute
+             _ -> isAbsolute
+
+isDirectory "" = return False
+isDirectory d
+    | isWmlAbsolute d = do
+        doesDirectoryExist d
+    | otherwise = do
+        doesDirectoryExist $ normalise $ combine gameConfigPath d
 
 fileName = takeFileName
 

@@ -3,9 +3,10 @@
 module PreProcessWml
 (
   preProcessWmlFile
-, preProcessWml
-, pp
 , initState
+, mkPPState
+, PreProcessorState(..)
+, WorkItem(..)
 ) 
     where
 
@@ -22,8 +23,10 @@ import Text.Parsec.Prim (unexpected)
 import Text.ParserCombinators.Parsec.Prim (getState, setState)
 
 import ApplicativeParsec
-import GameConfig
+
+import FileSystem
 import Utf8ReadWriteFile
+import Logging as Wesnoth
 
 
 ----------------------------------------------------------------------------------
@@ -102,47 +105,29 @@ data DefSig = DefSig
 -- 2. ~pathname - a path relative to the data/ subdirectory of the user's data directory
 -- 3. ./pathname - a path relative to the directory containing the file in which the pattern appears.
 
-expandPath _ ('~':path) = expandPath' $ userDataPath </> path
-expandPath rel ('.':('/':path)) = expandRelativePath rel path
-expandPath _ path = expandPath' $ systemDataPath </> path
-
-expandRelativePath "" path = error $ "Invalid relative path name ./" ++ path
-expandRelativePath f path = expandPath' $ takeDirectory f </> path
-
-expandPath' filePath = do
-    dir <- doesDirectoryExist filePath
-    if dir
-    then expandDirectory filePath
-    else return $ checkFile filePath (takeExtension filePath)
-
-checkFile f ".cfg" = [f]
-checkFile _ _ = []
-
-expandPath'' _ ".." = return []
-expandPath'' _ "." = return []
-expandPath'' _ "images" = return []
-expandPath'' _ "sounds" = return []
-expandPath'' p f = expandPath' $ normalise $ p </> f
-
-expandDirectory filePath = do
-    let _main = normalise $ filePath </> "_main.cfg"
-    exist <- doesFileExist $ _main
-    if exist
-    then return $ [_main]
-    else expandDirectory' filePath
-
-expandDirectory' filePath = do
-    c <- getDirectoryContents filePath
-    let (i,c') = L.partition ((==) "_initial.cfg") c
-    let (f,c'') = L.partition ((==) "_final.cfg") c'
-    i' <- mapM (expandPath'' filePath) $ i 
-    f' <- mapM (expandPath'' filePath) $ f 
-    c''' <- mapM (expandPath'' filePath) $ L.sort c'' 
-    return $ concat i' ++ concat c''' ++ concat f'
-
+expandPath _ "" = do
+    Wesnoth.log "ERR" "empty path given to expandPath\n"
+    return []
+expandPath currentDir path = do
+    let expandDir = do
+        (fs,_,_) <- getFilesInDir path True False EntireFilePath SkipMediaDir DoReorder Nothing
+        return fs
+    let expandPath' = do
+        p <-  getWmlLocation path currentDir
+        expandPath currentDir p
+    let expandFile = do
+        isFile <- doesFileExist path
+        if isFile
+        then return [path] 
+        else expandPath'
+    isDir <- isDirectory path
+    if isDir
+    then expandDir
+    else expandFile
+    
 preProcessWmlFile f = driver $ initState f
 
-driver :: PreProcessorState -> IO (String)
+driver :: PreProcessorState -> IO String
 driver (PreProcessorState (Just path) [] defines sdepth pd pb) = do
     files <- expandPath "" path
     driver $ mkPPState Nothing (L.map File files) defines sdepth pd pb
@@ -155,7 +140,6 @@ driver (PreProcessorState Nothing ((Cont cont _): _) defines _ _ _) = do
     let (pps', result) = cont defines 
     result' <- driver pps'
     return $ result ++ result'
-
 driver (PreProcessorState Nothing ((File file): work) defines sdepth pd pb) = do
     s <- readFileUtf8 file
     let pps = mkPPState Nothing work defines sdepth pd pb
@@ -188,8 +172,6 @@ preProcessWml = do
 
 preProcessWml' :: Int -> String -> PreProcessorParser
 preProcessWml' 0 [] = do
-    -- pos <- getPosition
-    -- error $ " reached eof @ " ++ show pos
     return ""
 preProcessWml' 0 ('{': _) = char '{' *> substitute '}'
 preProcessWml' 0 ('#': _) = char '#' *> directive 0
@@ -206,14 +188,7 @@ preProcessWml' 0 (_: cs) = do
                   preProcessWml' 0 inp
                 }
 preProcessWml' _ [] = return ""
-{--
-preProcessWml' _ [] = do
-    pos <- getPosition
-    error $ "dangling #if " ++ show pos
---}
 preProcessWml' sd ('#': _) = do
-    -- inp <- getInput
-    -- error $ "pp # " ++ show sd ++ inp
     char '#' *> directive sd
 preProcessWml' sd _ = skip sd
 
@@ -494,5 +469,3 @@ undef' (k: _) = do
     return $ mkPPState (path st) (work st) nm
                        (skippingDepth st) (pendingDefine st) (pendingBody st)
 
--- A little utility
-pp x y = do { p <- preProcessWmlFile x; writeFileUtf8 y p;}
