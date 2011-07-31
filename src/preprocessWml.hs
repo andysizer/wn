@@ -38,14 +38,18 @@ data PreProcessorState = PreProcessorState
     }
         -- deriving (Eq, Show)
 
-updatePath st p = PreProcessorState p (work st) (defines st) (domain st) (skippingDepth st) (pendingDefine st) (pendingBody st) (inString st)
-updateWork st w = PreProcessorState (path st) w (defines st) (domain st) (skippingDepth st) (pendingDefine st) (pendingBody st) (inString st)
-updateDefineMap st nm = PreProcessorState (path st) (work st) nm (domain st) (skippingDepth st) (pendingDefine st) (pendingBody st) (inString st)
-updateDomain st d = PreProcessorState (path st) (work st) (defines st) d (skippingDepth st) (pendingDefine st) (pendingBody st) (inString st)
-updateSDepth st d = PreProcessorState (path st) (work st) (defines st) (domain st) d (pendingDefine st) (pendingBody st) (inString st)
-updateDefine st d = PreProcessorState (path st) (work st) (defines st) (domain st) (skippingDepth st) d [] (inString st)
-updateBody st b = PreProcessorState (path st) (work st) (defines st) (domain st) (skippingDepth st) (pendingDefine st) b (inString st) 
-toggleInString st = PreProcessorState (path st) (work st) (defines st) (domain st) (skippingDepth st) (pendingDefine st) (pendingBody st) (not (inString st))
+updateDefineMap st nm = PreProcessorState (path st) (work st) nm (domain st) 
+                                          (skippingDepth st) (pendingDefine st) (pendingBody st) (inString st)
+updateDomain st d = PreProcessorState (path st) (work st) (defines st) d 
+                                      (skippingDepth st) (pendingDefine st) (pendingBody st) (inString st)
+updateSDepth st d = PreProcessorState (path st) (work st) (defines st) (domain st) 
+                                      d (pendingDefine st) (pendingBody st) (inString st)
+updateDefSig st d = PreProcessorState (path st) (work st) (defines st) (domain st) 
+                                      (skippingDepth st) d [] (inString st)
+updateDefBody st b = PreProcessorState (path st) (work st) (defines st) (domain st) 
+                                       (skippingDepth st) (pendingDefine st) b (inString st) 
+toggleInString st = PreProcessorState (path st) (work st) (defines st) (domain st) 
+                                      (skippingDepth st) (pendingDefine st) (pendingBody st) (not (inString st))
 
 type PreProcessorParser = GenParser Char PreProcessorState String
 
@@ -115,6 +119,12 @@ preProcessWml' 0 ('#': cs) = do
     if inString st
     then preProcessWml' 0 ('_':cs) -- ignore the #
     else char '#' *> directive 0
+preProcessWml' 0 ('<': cs) = do
+    anyChar
+    quoted <- preprocessQuoted 0 '<' cs
+    inp <- getInput;
+    rest <- preProcessWml' 0 inp
+    return $ quoted ++ rest
 preProcessWml' 0 (_: cs) = do
     c <- anyChar
     st <- getState
@@ -122,12 +132,12 @@ preProcessWml' 0 (_: cs) = do
         Nothing ->  if c == '"'
                     then do { setState $ toggleInString st;
                               rest <- preProcessWml' 0 cs;
-                              return $ (c:rest)
+                              return (c:rest)
                             }
                     else do { rest <- preProcessWml' 0 cs;
-                              return $ (c:rest)
+                              return (c:rest)
                             }
-        _ -> do { b <- many (noneOf "#");
+        _ -> do { b <- many $ noneOf "#";
                   pendBody b;
                   inp <- getInput;
                   preProcessWml' 0 inp
@@ -145,6 +155,32 @@ preProcessWml' sd ('"':_) = do
     skip sd
 preProcessWml' sd _ = skip sd
 
+preprocessQuoted 1 '>' ('>' : cs) = do
+    anyChar
+    return ">>"
+preprocessQuoted 0 '<' ('<':cs) = do
+        anyChar
+        frag <- many $ noneOf "<>"
+        c <- anyChar
+        inp <- getInput
+        rest <- preprocessQuoted 1 c inp
+        return $ "<<" ++ frag ++ rest
+preprocessQuoted 0 '<' (_:cs) = do
+        c <- anyChar
+        return "<"
+preprocessQuoted n c1 (c2:cs) = do
+    anyChar
+    let pat = [c1,c2]
+    let n' = case pat of
+                 "<<" -> n + 1
+                 ">>" -> n -1
+                 _ -> n
+    frag <- many $ noneOf "<>"
+    c <- anyChar
+    inp <- getInput
+    rest <- preprocessQuoted n' c inp
+    return $ pat ++ frag ++ rest
+    
 continue sd = do
     inp <- getInput
     preProcessWml' sd inp
@@ -162,16 +198,14 @@ substitute r = do
                       d <- return $ M.lookup h (defines st);
                       substitute' d h t
                     }
-        [] -> do { pos <- getPosition;
-                   error $ "empty {} not allowed " ++ show pos
-                 }
+        [] -> return "{}" -- This is a nasty hack to support lua code
 substituteItem :: PreProcessorParser
 substituteItem = 
         spaces *> bracketItem <* spaces
     <|> braceItem <* spaces
     <|> many (noneOf " (){}\n\r\t") <* spaces
 
-bracketItem = char '(' *> substituteItem' '(' ')' 
+bracketItem = char '(' *> substituteBracketItem' '(' ')' 
 
 braceItem = char '{' *> substituteItem' '{' '}'
 
@@ -179,7 +213,16 @@ substituteItem' :: Char -> Char -> PreProcessorParser
 substituteItem' l r = do
     items <- spaces *> manyTill substituteItem (char r)
     case items of
-        [] -> error "empty {} not allowed"
+        [] -> do { pos <- getPosition;
+                   error $ "empty {} not allowed " ++ show pos
+                 }
+        (h : t) -> return $ [l] ++ items ++ [r]
+	           where items = h ++ foldr (\x y -> (' ': x ++ y)) "" t
+
+substituteBracketItem' l r = do
+    items <- spaces *> manyTill substituteItem (char r)
+    case items of
+        [] -> return [l,r]
         (h : t) -> return $ [l] ++ items ++ [r]
 	           where items = h ++ foldr (\x y -> (' ': x ++ y)) "" t
     
@@ -197,7 +240,7 @@ substitute' Nothing pat _ = do
         else do
              {
                linfo <- lineInfo;
-               return (linfo, "#textdomain " ++ (domain st) ++ "\n")
+               return (linfo, "\376textdomain " ++ (domain st) ++ "\n")
              }
     let preProcessWmlFilePostInclude = do
             setPosition pos
@@ -224,7 +267,7 @@ substitute' (Just def) pat args = do
                           "\376textdomain " ++ d ++ " ")
     let scs = substituteArgs  (defArgs (sig def)) args (body def)
     let pps = PreProcessorState Nothing [] (defines st) d 0 Nothing [] False
-    let scs' = case runParser preProcessWml pps "" scs of
+    let scs' = case runParser preProcessWml pps pat scs of
                    Right r -> r
                    Left e -> fail $ show e
     let sd = skippingDepth st
@@ -301,11 +344,11 @@ pdefargs (x:xs) = (("{" ++ x ++ "}"): pdefargs xs)
 
 pendDefine s = do
     st <- getState
-    setState $ updateDefine st (Just s)
+    setState $ updateDefSig st (Just s)
 
 pendBody b = do
     st <- getState
-    setState $ updateBody st (b : (pendingBody st))
+    setState $ updateDefBody st (b : (pendingBody st))
 
 updateDefines = do
     st <- getState

@@ -8,6 +8,7 @@ module PreProcessWmlIO
 
 import Data.List as L
 import System.Directory
+import System.FilePath
 
 import FileSystem
 import Utf8ReadWriteFile
@@ -22,16 +23,18 @@ driver (PreProcessorState (Just path) [] defines dom sdepth pd pb is) = do
     files <- expandPath "" path
     driver $ PreProcessorState Nothing (L.map File files) defines dom sdepth pd pb is
 driver (PreProcessorState (Just path) work@((Cont _ file): _) defines dom sdepth pd pb is) = do
-    files <- expandPath file path
+    files <- expandPath (dropFileName file) path
     driver $ PreProcessorState Nothing (L.map File files ++ work) defines dom sdepth pd pb is
 driver (PreProcessorState Nothing [] _ _ _ _ _ _) = return ""
-driver (PreProcessorState Nothing ((Cont cont _): _) defines _ _ _ _ _) = do
+driver (PreProcessorState Nothing ((Cont cont file): _) defines _ _ _ _ _) = do
+    Wesnoth.log "PP" ("continuing " ++ file ++ "\n")
     let (pps', result) = cont defines 
     result' <- driver pps'
     return $ result ++ result'
 driver (PreProcessorState Nothing ((File file): work) defines dom sdepth pd pb is) = do
     s <- readFileUtf8 file
     let pps = PreProcessorState Nothing work defines dom sdepth pd pb is
+    Wesnoth.log "PP" ("preprocessing " ++ file ++ "\n")
     let (pps', result) = PP.preProcessWmlFile pps file s
     result' <- driver pps'
     return $ result ++ result'

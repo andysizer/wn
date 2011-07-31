@@ -30,9 +30,12 @@ import GameConfig
 
 import Logging as Wesnoth
 
-data FileNameOption = EntireFilePath | FileNameOnly
-data FileFilterOption = NoFilter | SkipMediaDir
-data FileReorderOption = DontReorder | DoReorder
+data FileNameOption = EntireFilePath | FileNameOnly 
+    deriving (Eq, Ord, Show)
+data FileFilterOption = NoFilter | SkipMediaDir 
+    deriving (Eq, Ord, Show)
+data FileReorderOption = DontReorder | DoReorder 
+    deriving (Eq, Ord, Show)
 
 data CheckSumResult = CheckSumResult
     {
@@ -83,9 +86,13 @@ tryMainCfg dir path dirs nameOption filterOption cs = do
     mainExists <- doesFileExist path
     if mainExists
     then case nameOption of
-             EntireFilePath -> return ([path],[], cs)
-             FileNameOnly -> return ([mainCfgFilename],[], cs)
+             EntireFilePath -> returnFilesResult dir "tryMainCfg" ([path],[], cs) nameOption filterOption
+             FileNameOnly -> returnFilesResult dir "tryMainCfg" ([mainCfgFilename],[], cs) nameOption filterOption
     else getFilesInDir' dir True dirs nameOption filterOption DoReorder cs
+
+returnFilesResult dir fn r@(files, dirs, cs) n f = do
+    Wesnoth.log "FS" (fn ++ " " ++ dir ++ " -> (" ++ show files ++ ", " ++ show dirs ++ ") " ++ show n ++ " " ++ show f ++ "\n")
+    return r 
 
 getFilesInDir' path files dirs nameOption filterOption reorderOption  cs = do
     let addFile f (fs,ds,cs) = do
@@ -130,7 +137,7 @@ getFilesInDir' path files dirs nameOption filterOption reorderOption  cs = do
     contents <- getDirectoryContents path
     let acc = return ([],[],cs)
     (fs, ds, cs') <- foldr addEntry acc contents
-    return $ (reorderFiles reorderOption fs, sort ds, cs')
+    returnFilesResult path "getFilesInDir'" (reorderFiles reorderOption fs, sort ds, cs') nameOption filterOption
                                       
 reorderFiles DontReorder fs = sort fs
 reorderFiles DoReorder fs = i ++ sort fs'' ++ f
