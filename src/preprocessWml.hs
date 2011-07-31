@@ -198,7 +198,10 @@ substitute r = do
                       d <- return $ M.lookup h (defines st);
                       substitute' d h t
                     }
-        [] -> return "{}" -- This is a nasty hack to support lua code
+        [] -> do { pos <- getPosition;
+                   error $ "empty {} not allowed " ++ show pos
+                 }
+
 substituteItem :: PreProcessorParser
 substituteItem = 
         spaces *> bracketItem <* spaces
