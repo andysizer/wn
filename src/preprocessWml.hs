@@ -18,8 +18,9 @@ import Text.Parsec.Prim (unexpected)
 import Text.ParserCombinators.Parsec.Prim (getState, setState)
 
 import ApplicativeParsec
-
 import WesConfig as WCgf
+
+import FileSystem (getShortWmlPath)
 
 data WorkItem =
      File !FilePath
@@ -35,21 +36,70 @@ data PreProcessorState = PreProcessorState
     , pendingDefine :: Maybe DefSig
     , pendingBody :: ![String]
     , inString :: !Bool
+    , history :: !String
     }
         -- deriving (Eq, Show)
 
-updateDefineMap st nm = PreProcessorState (path st) (work st) nm (domain st) 
-                                          (skippingDepth st) (pendingDefine st) (pendingBody st) (inString st)
-updateDomain st d = PreProcessorState (path st) (work st) (defines st) d 
-                                      (skippingDepth st) (pendingDefine st) (pendingBody st) (inString st)
-updateSDepth st d = PreProcessorState (path st) (work st) (defines st) (domain st) 
-                                      d (pendingDefine st) (pendingBody st) (inString st)
-updateDefSig st d = PreProcessorState (path st) (work st) (defines st) (domain st) 
-                                      (skippingDepth st) d [] (inString st)
-updateDefBody st b = PreProcessorState (path st) (work st) (defines st) (domain st) 
-                                       (skippingDepth st) (pendingDefine st) b (inString st) 
-toggleInString st = PreProcessorState (path st) (work st) (defines st) (domain st) 
-                                      (skippingDepth st) (pendingDefine st) (pendingBody st) (not (inString st))
+updateDefineMap st nm = PreProcessorState 
+                            (path st) 
+                            (work st) 
+                            nm 
+                            (domain st) 
+                            (skippingDepth st) 
+                            (pendingDefine st) 
+                            (pendingBody st) 
+                            (inString st)
+                            (history st)
+updateDomain st d = PreProcessorState 
+                        (path st) 
+                        (work st)
+                        (defines st)
+                        d 
+                        (skippingDepth st)
+                        (pendingDefine st)
+                        (pendingBody st)
+                        (inString st)
+                        (history st)
+updateSDepth st d = PreProcessorState 
+                        (path st)
+                        (work st)
+                        (defines st)
+                        (domain st) 
+                        d
+                        (pendingDefine st)
+                        (pendingBody st)
+                        (inString st)
+                        (history st)
+updateDefSig st d = PreProcessorState 
+                        (path st)
+                        (work st)
+                        (defines st)
+                        (domain st) 
+                        (skippingDepth st)
+                        d
+                        []
+                        (inString st)
+                        (history st)
+updateDefBody st b = PreProcessorState 
+                         (path st)
+                         (work st)
+                         (defines st)
+                         (domain st) 
+                         (skippingDepth st)
+                         (pendingDefine st)
+                         b
+                         (inString st) 
+                         (history st)
+toggleInString st = PreProcessorState 
+                        (path st)
+                        (work st)
+                        (defines st)
+                        (domain st) 
+                        (skippingDepth st)
+                        (pendingDefine st)
+                        (pendingBody st)
+                        (not (inString st))
+                        (history st)
 
 type PreProcessorParser = GenParser Char PreProcessorState String
 
@@ -62,6 +112,7 @@ initState path = PreProcessorState (Just path)
                                    Nothing      -- no define sig
                                    []           -- or body
                                    False        -- not in a string
+                                   ""           -- no history
 
 ----------------------------------------------------------------------------------
 -- Types for dealing with #define
@@ -80,6 +131,7 @@ data DefSig = DefSig
       defName :: !String
     , defArgs :: ![String]
     , defDomain :: !String
+    , defHistory :: !String
     }
         deriving (Eq, Show)
 
@@ -97,12 +149,21 @@ preProcessWmlFile' = do
     st' <- getState
     return (st', l ++ r)
 
-lineInfo = do
+historyItem = do
     pos <- getPosition
+    return (" " ++ (show $ (sourceLine pos)) ++ " " ++ getShortWmlPath (sourceName pos))
+
+getHistory Nothing = do
     st <- getState
-    return $ "\n#line \"" ++ (sourceName pos) ++ "\" " 
-                          ++ (show $ sourceLine pos) ++ " " 
-                          ++ (show $ sourceColumn pos) ++ "\n"
+    h <- historyItem
+    return $ "\376line" ++ h ++ (history st) ++ "\n"
+getHistory (Just def) = do
+    st <- getState
+    h <- historyItem
+    return $ "\376line" ++ (defHistory (sig def)) ++ h ++ (history st) ++ "\n"
+
+lineInfo = getHistory Nothing
+
 
 preProcessWml :: PreProcessorParser
 preProcessWml = do
@@ -253,30 +314,58 @@ substitute' Nothing pat _ = do
             st' <- getState
             return (st', l ++ td ++ r)
     let cont d = do 
-            let pps = updateDefineMap st d
+            let pps = updateDefineMap st d -- NB this closes over the history at the point of inclusion
+                                           -- so no need for an explicit pop.
             case runParser preProcessWmlFilePostInclude pps "" "" of
                 Right r -> r
                 Left e -> error $ show e
-    let pps = PreProcessorState (Just pat) ((Cont cont file) : (work st)) (defines st) (domain st) 0 Nothing [] (inString st)
+    hItem <- historyItem
+    let h = hItem ++ history st
+    let pps = PreProcessorState (Just pat) -- tell the driver to preprocess pat
+                                ((Cont cont file) : (work st)) -- push the continuation to outstanding work
+                                (defines st) -- use the defines currently in play
+                                (domain st) -- use the current text domain - this might be wrong
+                                0 -- reset skip depth
+                                Nothing -- no outstanding define
+                                []      -- or body
+                                (inString st) -- this will suppress auto-emission of lineinfo and textdomain
+                                              -- we might not want this if the string parser deals with this
+                                              -- properly. 
+                                h -- updated history to reflect 'includer'
     setState pps
     return ""
 substitute' (Just def) pat args = do
     let md = (defDomain (sig def))
     st <- getState
     let d = (domain st)
-    let (mtd, td) = if (md == d) || (inString st)
+    mh <- if (inString st) then return "" else getHistory (Just def)
+    h <- if (inString st) then return "" else lineInfo
+    let (mtd, td) = if (inString st)
                     then ("","")
-                    else ("\376textdomain " ++ md ++ " ", 
-                          "\376textdomain " ++ d ++ " ")
+                    else ("\376textdomain " ++ md ++ "\n", 
+                          "\376textdomain " ++ d ++ "\n")
     let scs = substituteArgs  (defArgs (sig def)) args (body def)
-    let pps = PreProcessorState Nothing [] (defines st) d 0 Nothing [] False
+    let pps = PreProcessorState Nothing -- no files do deal with
+                                [] -- no outstanding work
+                                (defines st) -- use current set of defines for futher expansions
+                                d -- use current text domain
+                                0 -- reset skip depth
+                                Nothing -- no outstanding define
+                                []      -- or body
+                                True    -- suppress auto lineinfo and domain emission  
+                                (history st) -- use current history
+    {-- 
+     ** this is BROKEN ** 
+     ** It doesn't deal with file inclusion as an argument to a macro expnasion.
+     ** Maybe this (sensibly) doesn't occur. But ... trouble in waiting
+    --}
     let scs' = case runParser preProcessWml pps pat scs of
                    Right r -> r
                    Left e -> fail $ show e
     let sd = skippingDepth st
     inp <- getInput
     cs <- preProcessWml' sd inp
-    return $ mtd ++ scs' ++ td ++ cs
+    return $ mh ++ mtd ++ scs' ++ h ++ td ++ cs
 
 substituteArgs [] _ b = b
 substituteArgs (x:xs) [] b = substituteArgs xs [] (replace x [] b)
@@ -331,9 +420,11 @@ define sd =  skip sd
 
 defineSig = do
     l <- restOfLine
+    anyChar -- remove \n now so getHistory references first line of body of define
     (name, args) <- pdefsig l
     st <- getState
-    return (DefSig name args (domain st))
+    hItem <- historyItem
+    return $ DefSig name args (domain st) (hItem ++ (history st))
 
 pdefsig l = pdefsig' $ words l
 
@@ -359,7 +450,8 @@ updateDefines = do
     let body = dropWhile ((==) ' ') $ concat $ reverse $ (pendingBody st)
     nm <- return $ M.insert (defName s) (Define s body) (defines st)
     setState $ PreProcessorState (path st) (work st) nm (domain st)
-                                 (skippingDepth st) Nothing [] (inString st)
+                                 (skippingDepth st) Nothing [] 
+                                 (inString st) (history st)
 
 ifDirective sd = do
     char 'f'
