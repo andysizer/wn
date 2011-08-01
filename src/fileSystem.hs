@@ -8,6 +8,7 @@ module FileSystem
 , FileReorderOption(..)
 , dataTreeCheckSum
 , getWmlLocation
+, getShortWmlPath
 , getFileSize
 , isDirectory
 , directoryName
