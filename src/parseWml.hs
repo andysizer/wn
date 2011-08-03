@@ -2,6 +2,7 @@
 
 module ParseWml
 (
+  parseWml
 ) 
     where
 
@@ -17,6 +18,8 @@ data Node = Node
     , nBody :: NodeBody
     }
         deriving (Eq, Show)
+
+emptyNode = Node "" []
 
 -- merge nodes 
 data MergeNode = MergeNode
@@ -34,9 +37,29 @@ data NodeItem = NAtt Attribute
               | NMNode MergeNode
         deriving (Eq, Show)
 
+parseWml s = parse topLevel "" s
+
+-- topLevel = 
+topLevel = manyTill (spaces *> topLevelItem) eof
+
+topLevelItem =
+        marker *> sourceOrDomain *> spaces *> return emptyNode  -- deal with \376
+    <|> hash *> domain *> spaces *> return emptyNode            -- deal with #
+    <|> topLevelNode
+
+sourceOrDomain =
+        char 'l' *> sourceInfo
+    <|> domain
+
+sourceInfo = do
+    many (noneOf "\n")
+    anyChar
+
+domain = do
+    many (noneOf "\n")
+    anyChar
 
 -- Main node parser
--- need type decl to get it to type check
 parseNode :: (a -> NodeItem) -> (String -> NodeBody -> a) -> CharParser () NodeItem
 parseNode c1 c2 =
     do start <- tagName
@@ -46,8 +69,7 @@ parseNode c1 c2 =
 
 mkNode c1 c2 s b e
     | s == e = return $ c1 $ c2 s b
-    | otherwise 
-    = unexpected (": end tag '" ++ e ++ "' does not match '" ++ s ++ "'")
+    | otherwise = unexpected (": end tag '" ++ e ++ "' does not match '" ++ s ++ "'")
 
 -- 'constructors' for different node types
 node = parseNode NNode Node
@@ -64,6 +86,8 @@ topLevelNode =
 -- parsing node bodies. NB no 'try's.
 nodeBody = 
         lb *> maybeEndBody
+    <|> marker *> sourceOrDomain *> spaces *> nodeBody
+    <|> hash *> domain *> spaces *> nodeBody
     <|> attributeThenNodeBody
 
 -- maybeEndBody
@@ -143,8 +167,9 @@ maybeValues =
            return (value : values)
     <|> return [] 
 
-attValue = 
-        char '_' *> translatableAttValue
+attValue =
+        marker *> sourceOrDomain *> spaces *> attValue
+    <|> char '_' *> spaces *> translatableAttValue
     <|> char '$' *> substitionAttValue
     <|> char '"' *> quotedAttValue
     <|> defaultAttValue
@@ -181,7 +206,7 @@ pConcatString =
 formulaAttValue = between (char '(') (char ')') (many (noneOf ")"))
 
 -- TODO should we 'trim' this. What about the others?
-defaultAttValue = String <$> anyChar `manyTill` eol
+defaultAttValue = String <$> anyChar `manyTill` (char '\n')
 
 tagName = manyTill namechars rb <* spaces
 attName = many namechars <* spaces
@@ -195,12 +220,8 @@ rb = char ']'
 
 plus = char '+'
 
-eol =   
-        try (string "\n\r")
-    <|> try (string "\r\n")
-    <|> string "\n"
-    <|> string "\r"
-    <?> "end of line"
+marker = char '\376'
+hash = char '#'
 
 t1 = "[tag]"
 t2 = "key"
