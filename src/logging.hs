@@ -8,5 +8,9 @@ module Logging
 
 import System.IO
 
+enabledLogs = []
+
 log logName msg = do
-    putStr $ logName ++ ":\t" ++ msg
+    if logName `elem` enabledLogs
+    then putStr $ logName ++ ":\t" ++ msg
+    else return ()
