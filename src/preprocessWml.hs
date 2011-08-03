@@ -20,8 +20,6 @@ import Text.ParserCombinators.Parsec.Prim (getState, setState)
 import ApplicativeParsec
 import WesConfig as WCgf
 
-import FileSystem (getShortWmlPath)
-
 data WorkItem =
      File !FilePath
    | Cont !Continuation !FilePath
@@ -151,7 +149,7 @@ preProcessWmlFile' = do
 
 historyItem = do
     pos <- getPosition
-    return (" " ++ (show $ (sourceLine pos)) ++ " " ++ getShortWmlPath (sourceName pos))
+    return (" " ++ (show $ (sourceLine pos)) ++ " " ++ sourceName pos)
 
 getHistory Nothing = do
     st <- getState

@@ -33,9 +33,10 @@ driver (PreProcessorState Nothing ((Cont cont file): _) defines _ _ _ _ _ _) = d
     return $ result ++ result'
 driver (PreProcessorState Nothing ((File file): work) defines dom sdepth pd pb is h) = do
     s <- readFileUtf8 file
+    let sn = getShortWmlPath file
     let pps = PreProcessorState Nothing work defines dom sdepth pd pb is h
-    Wesnoth.log "PP" ("preprocessing " ++ file ++ "\n")
-    let (pps', result) = PP.preProcessWmlFile pps file s
+    Wesnoth.log "PP" ("preprocessing " ++ sn ++ "\n")
+    let (pps', result) = PP.preProcessWmlFile pps sn s
     result' <- driver pps'
     return $ result ++ result'
 
