@@ -61,11 +61,13 @@ domain = do
 
 -- Main node parser
 parseNode :: (a -> NodeItem) -> (String -> NodeBody -> a) -> CharParser () NodeItem
-parseNode c1 c2 =
-    do start <- tagName
-       body <- nodeBody
-       end <- tagName
-       mkNode c1 c2 start body end
+parseNode c1 c2 = do
+    start <- tagName
+    body <- nodeBody
+    end <- tagName
+    mkNode c1 c2 start body end
+
+tagName = manyTill namechars rb <* spaces
 
 mkNode c1 c2 s b e
     | s == e = return $ c1 $ c2 s b
@@ -77,11 +79,11 @@ node = parseNode NNode Node
 mergeNode = parseNode NMNode MergeNode
 
 -- Top Level Node parser 
-topLevelNode = 
-    do spaces
-       lb
-       (NNode n) <- node
-       return n
+topLevelNode = do
+    spaces
+    lb
+    (NNode n) <- node
+    return n
 
 -- parsing node bodies. NB no 'try's.
 nodeBody = 
@@ -102,11 +104,11 @@ maybeEndBody =
 
 -- attributeThenNodeBody
 -- we didn't see [, so must be an attribute followed by ...
-attributeThenNodeBody =
-    do a <- attribute
-       spaces
-       b <- nodeBody
-       return (a : b)
+attributeThenNodeBody = do
+    a <- attribute
+    spaces
+    b <- nodeBody
+    return (a : b)
 
 internalNode =
         char '+' *> mergeNode
@@ -127,101 +129,114 @@ data Mattribute = Mattribute
     }
         deriving (Eq, Show)
 
-data AttributeValue = Translatable String
-                    | Substitution String
+attribute = do
+    spaces
+    key <- attName
+    keys <- maybeKeys
+    finishAtrribute key keys
+
+attName = many namechars <* spaces
+
+maybeKeys = do
+        char ','
+        spaces
+        key <- attName
+        keys <- maybeKeys
+        return (key : keys)
+    <|> return [] 
+
+finishAtrribute key [] = do
+    char '='
+    spaces
+    value <- attributeValue
+    return $ NAtt $ Attribute key value
+finishAtrribute key keys = do
+    char '='
+    spaces
+    value <- attributeValue
+    values <- maybeValues
+    return $ NMatt $ Mattribute (key:keys) (value:values)
+
+maybeValues = do 
+        char ','
+        spaces
+        value <- attributeValue
+        values <- maybeValues
+        return (value : values)
+    <|> return [] 
+
+data AttributeValue = Variable String
                     | Formula String
-                    | String String
+                    | String [StringValue]
         deriving (Eq, Show)
 
-attribute = 
-    do spaces
-       key <- attName
-       keys <- maybeKeys
-       finishAtrribute key keys
+attributeValue =
+        marker *> sourceOrDomain *> spaces *> attributeValue
+    <|> Variable <$> wmlVariableValue
+    <|> Formula <$> formulaValue
+    <|> String <$> stringValue
+    <|> String <$> defaultLineValue
 
-maybeKeys =
-        do char ','
-           spaces
-           key <- attName
-           keys <- maybeKeys
-           return (key : keys)
-    <|> return [] 
+wmlVariableValue = char '$' *> many namechars <* spaces
 
-finishAtrribute key [] = 
-   do char '='
-      spaces
-      value <- attValue
-      return $ NAtt $ Attribute key value
-finishAtrribute key keys = 
-   do char '='
-      spaces
-      value <- attValue
-      values <- maybeValues
-      return $ NMatt $ Mattribute (key:keys) (value:values)
+formulaValue = try(string "\"$(") *> many (noneOf ")") <* anyChar
 
-maybeValues = 
-        do char ','
-           spaces
-           value <- attValue
-           values <- maybeValues
-           return (value : values)
-    <|> return [] 
+data StringValue = Translatable String
+                 | QuotedString String
+        deriving (Eq, Show)
+ 
+stringValue = do 
+    s <- quotedStringValue
+    r <- stringValueRest
+    return (s:r)
 
-attValue =
-        marker *> sourceOrDomain *> spaces *> attValue
-    <|> char '_' *> spaces *> translatableAttValue
-    <|> char '$' *> substitionAttValue
-    <|> char '"' *> quotedAttValue
-    <|> defaultAttValue
-    <?> "Invalid attribute value"
-
-translatableAttValue = char '"' *> (Translatable <$> pString)
-
-substitionAttValue = Substitution <$> wmlVarName
-
-quotedAttValue = 
-        char '$' *> (Formula <$> formulaAttValue) <* (spaces *> char '"')
-    <|> String <$> quotedAttValue'
-
-quotedAttValue' = 
-    do s <- pString
-       spaces
-       r <- pConcatString
-       return $ s ++ r
-
-pString = 
-    do s <- anyChar `manyTill` (char '"')
-       r <- pString'
-       return $ s ++ r
-
-pString' = 
-        char '"' *> ((:) <$> (return '"') <*> pString)
+stringValueRest = 
+        try(plus) *>
+        do
+        { s <- quotedStringValue;
+          r <- stringValueRest;
+          return (s:r)
+        }
     <|> return []
 
-pConcatString = 
-        plus *> spaces *> char '"' *> quotedAttValue'
-    <|> return []
-            
+quotedStringValue = 
+        translatableString
+    <|> quotedString
 
-formulaAttValue = between (char '(') (char ')') (many (noneOf ")"))
+translatableString = do
+    char '_' 
+    spaces 
+    s <- simpleQuotedString
+    return $ Translatable s
 
--- TODO should we 'trim' this. What about the others?
-defaultAttValue = String <$> anyChar `manyTill` (char '\n')
+quotedString = do
+    s <- simpleQuotedString
+    return $ QuotedString s
 
-tagName = manyTill namechars rb <* spaces
-attName = many namechars <* spaces
-wmlVarName = many namechars <* spaces
+simpleQuotedString = do
+    char '"'
+    s <- manyTill (noneOf "\"") (char '"')
+    r <- maybeQuotedString
+    return $ s ++ r
 
-namechars' = ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9'] ++ ['_']
-namechars = oneOf namechars' 
+maybeQuotedString =
+        do { s <- simpleQuotedString; return ('"' : s)}
+    <|> return ""
+
+defaultLineValue = do
+    v <- anyChar `manyTill`  (char '\n')
+    return $ [QuotedString v]
 
 lb = char '['
 rb = char ']'
 
-plus = char '+'
+namechars' = ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9'] ++ ['_']
+namechars = oneOf namechars' 
 
 marker = char '\376'
 hash = char '#'
+
+plus = spaces *> char '+' <* spaces
 
 t1 = "[tag]"
 t2 = "key"
