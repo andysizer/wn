@@ -367,7 +367,10 @@ substitute' (Just def) pat args = do
 
 substituteArgs [] _ b = b
 substituteArgs (x:xs) [] b = substituteArgs xs [] (replace x [] b)
-substituteArgs (x:xs) (y:ys) b = substituteArgs xs ys (replace x y b)
+substituteArgs (x:xs) (y:ys) b = substituteArgs xs ys (substituteArg x y b)
+
+substituteArg x ('(':y) b = substituteArg x (L.init y) b
+substituteArg x y b = replace x y b
 
 replace _ _ [] = []
 replace old new xs@(y:ys) =
