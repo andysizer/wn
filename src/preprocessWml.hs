@@ -265,11 +265,35 @@ substituteItem :: PreProcessorParser
 substituteItem = 
         spaces *> bracketItem <* spaces
     <|> braceItem <* spaces
+    <|> simpleQuotedString <* spaces
+    <|> translatableString <*spaces
     <|> many (noneOf " (){}\n\r\t") <* spaces
 
 bracketItem = char '(' *> substituteBracketItem' '(' ')' 
 
 braceItem = char '{' *> substituteItem' '{' '}'
+
+simpleQuotedString = do
+    char '"'
+    s <- manyTill (noneOf "\"") (char '"')
+    r <- maybeQuotedString
+    return $ ('"':s) ++ r ++ "\""
+
+simpleQuotedString' = do
+    char '"'
+    s <- manyTill (noneOf "\"") (char '"')
+    r <- maybeQuotedString
+    return $ s ++ r
+
+maybeQuotedString =
+        do { s <- simpleQuotedString'; return ('"' : s)}
+    <|> return ""
+
+translatableString = do
+    char '_' 
+    spaces 
+    s <- simpleQuotedString
+    return $ ('_':s)
 
 substituteItem' :: Char -> Char -> PreProcessorParser
 substituteItem' l r = do
@@ -342,7 +366,7 @@ substitute' (Just def) pat args = do
                     then ("","")
                     else ("\376textdomain " ++ md ++ "\n", 
                           "\376textdomain " ++ d ++ "\n")
-    let scs = substituteArgs  (defArgs (sig def)) args (body def)
+    scs <- substituteArgs  (defArgs (sig def)) args (body def)
     let pps = PreProcessorState Nothing -- no files do deal with
                                 [] -- no outstanding work
                                 (defines st) -- use current set of defines for futher expansions
@@ -365,8 +389,14 @@ substitute' (Just def) pat args = do
     cs <- preProcessWml' sd inp
     return $ mh ++ mtd ++ scs' ++ h ++ td ++ cs
 
-substituteArgs [] _ b = b
-substituteArgs (x:xs) [] b = substituteArgs xs [] (replace x [] b)
+substituteArgs [] [] b =  return b
+substituteArgs [] _ _ = do
+    pos <- getPosition
+    error $ "Too many arguments supplied to macro." ++ show pos
+-- substituteArgs (x:xs) [] b = substituteArgs xs [] (replace x [] b)
+substituteArgs (x:xs) [] _ = do
+    pos <- getPosition
+    error $ "Too few arguments supplied to macro." ++ show pos
 substituteArgs (x:xs) (y:ys) b = substituteArgs xs ys (substituteArg x y b)
 
 substituteArg x ('(':y) b = substituteArg x (L.init y) b
