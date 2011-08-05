@@ -175,26 +175,27 @@ data AttributeValue = Variable String
 
 attributeValue =
         marker *> sourceOrDomain *> spaces *> attributeValue
-    <|> Variable <$> wmlVariableValue
+    -- <|> Variable <$> wmlVariableValue
     <|> String <$> leadingUnderscore
     <|> Formula <$> formulaValue
     <|> String <$> stringValue
     <|> String <$> defaultAttValue
 
-wmlVariableValue = char '$' *> many namechars <* spaces
+--wmlVariableValue = char '$' *> many wmlVarChars <* spaces
 
 leadingUnderscore = do
     try(char '_' *> noneOf " \"\n[" >>= leadingUnderscore')
 
 leadingUnderscore' c = do
     v <- many  (noneOf "\n[")
-    return $ [QuotedString (c:v)]
+    return $ [SimpleString (c:v)]
 
 
 formulaValue = try(string "\"$(") *> many (noneOf ")") <* anyChar
 
 data StringValue = Translatable String
                  | QuotedString String
+                 | SimpleString String
         deriving (Eq, Show)
  
 stringValue = do 
@@ -236,14 +237,22 @@ maybeQuotedString =
     <|> return ""
 
 defaultAttValue = do
-    v <- many  (noneOf "\n[")
-    return $ [QuotedString v]
+    v <- many  (noneOf " \n[")
+    r <- defaultAttValueRest
+    return $ [SimpleString $ v ++ r]
+defaultAttValueRest =
+        char ' ' *> do {r <- many  (noneOf "\n["); return (' ': r) }
+    <|> char '[' *> do {r <- many  (noneOf " \n"); return ('[': r) }
+    <|> return ""
 
 lb = char '['
 rb = char ']'
 
-namechars' = ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9'] ++ ['_']
+namechars' = ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9'] ++ ['_','[',']','$']
 namechars = oneOf namechars' 
+
+wmlVarChars' = namechars' ++ ['.']
+--wmlVarChars = oneOf wmlVarChars'
 
 marker = char '\376'
 hash = char '#'
