@@ -3,11 +3,9 @@
 module PreProcessWml
 (
   preProcessWmlFile
-, preProcessWml
--- , preProcess
-, check
-, pp
 , initState
+, PreProcessorState(..)
+, WorkItem(..)
 ) 
     where
 
@@ -16,34 +14,11 @@ import Control.Monad
 import Data.List as L
 import Data.Map as M
 
-import System.IO 
-import System.Directory
-import System.FilePath
-
 import Text.Parsec.Prim (unexpected)
 import Text.ParserCombinators.Parsec.Prim (getState, setState)
 
 import ApplicativeParsec
-import GameConfig
-import Utf8ReadWriteFile
-
-
-----------------------------------------------------------------------------------
--- PreProcessorState
--- Holds the state of the preprocessor
--- state :       
---   describes what the preprocess is doing e.g. processing #if or #define.See PState.
---   It is a stack, implemented as list, that reflects conditional nesting.
---   Many of the parsing functions match against the top of the stack
---   NB it is never empty (see initState) so 'head' and 'tail' are always safe.
--- defines:
---   a map from name to a Define structure that describes a textual substitution
--- pendingDefine:
---   Only valid in Defining State. Contains the 'signature' of the #define being
---   processed.
--- pendingBody: 
---   Only valid in Defining State. Accumulates the body of the #define being
---   processed.
+import WesConfig as WCgf
 
 data WorkItem =
      File !FilePath
@@ -54,63 +29,88 @@ data PreProcessorState = PreProcessorState
       path :: Maybe FilePath
     , work :: ![WorkItem]
     , defines :: !DefMap
-    , state :: ![LPPState]
+    , domain :: !String
+    , skippingDepth :: !Int
     , pendingDefine :: Maybe DefSig
     , pendingBody :: ![String]
+    , inString :: !Bool
+    , history :: !String
     }
         -- deriving (Eq, Show)
 
-----------------------------------------------------------------------------------
--- PState
--- An enumeration of the possible states of the preprocessor processing a single file
+updateDefineMap st nm = PreProcessorState 
+                            (path st) 
+                            (work st) 
+                            nm 
+                            (domain st) 
+                            (skippingDepth st) 
+                            (pendingDefine st) 
+                            (pendingBody st) 
+                            (inString st)
+                            (history st)
+updateDomain st d = PreProcessorState 
+                        (path st) 
+                        (work st)
+                        (defines st)
+                        d 
+                        (skippingDepth st)
+                        (pendingDefine st)
+                        (pendingBody st)
+                        (inString st)
+                        (history st)
+updateSDepth st d = PreProcessorState 
+                        (path st)
+                        (work st)
+                        (defines st)
+                        (domain st) 
+                        d
+                        (pendingDefine st)
+                        (pendingBody st)
+                        (inString st)
+                        (history st)
+updateDefSig st d = PreProcessorState 
+                        (path st)
+                        (work st)
+                        (defines st)
+                        (domain st) 
+                        (skippingDepth st)
+                        d
+                        []
+                        (inString st)
+                        (history st)
+updateDefBody st b = PreProcessorState 
+                         (path st)
+                         (work st)
+                         (defines st)
+                         (domain st) 
+                         (skippingDepth st)
+                         (pendingDefine st)
+                         b
+                         (inString st) 
+                         (history st)
+toggleInString st = PreProcessorState 
+                        (path st)
+                        (work st)
+                        (defines st)
+                        (domain st) 
+                        (skippingDepth st)
+                        (pendingDefine st)
+                        (pendingBody st)
+                        (not (inString st))
+                        (history st)
 
-data LPPState = Top
-           | ProcessingIf
-           | SkippingIf
-           | ProcessingElse
-           | SkippingElse
-           | Defining
-           | TextDomain
-        deriving (Eq, Show)
-
-----------------------------------------------------------------------------------
--- constructor for PreProcessorState
-mkPPState p w ds s pd pb =
-    PreProcessorState {
-        path = p,
-        work = w,
-        defines = ds,
-        state = s,
-        pendingDefine = pd,
-        pendingBody = pb
-    }
+type PreProcessorParser = GenParser Char PreProcessorState String
 
 -- Initial Preprocessor State
-initState path = mkPPState (Just path) [] M.empty [Top] Nothing []
-
--- utility functions for manipulation PState
-
-setLPPState s st = setState $ mkPPState (path st) (work st) (defines st) 
-                                        s (pendingDefine st) (pendingBody st)
-
-popLPPState = do
-    st <- getState
-    setLPPState (tail $ state st) st
-
-pushLPPState n s = do
-    st <- getState
-    setLPPState (n : s) st
-
--- next two used by #if directives
-
-pushIfState True s = pushLPPState ProcessingIf s
-pushIfState False s = pushLPPState SkippingIf s
-
-switchIfState (ProcessingIf : xs) st = setLPPState (SkippingElse : xs) st
-switchIfState (SkippingIf : (SkippingElse : xs)) st = setLPPState (SkippingElse : (SkippingElse : xs)) st
-switchIfState (SkippingIf : (SkippingIf : xs)) st = setLPPState (SkippingElse : (SkippingIf : xs)) st
-switchIfState (SkippingIf : xs) st = setLPPState (ProcessingElse : xs) st
-switchIfState _ _ = unexpected ": #else nested incorrectly"
+initState path = PreProcessorState (Just path)
+                                   []           -- no work
+                                   M.empty      -- no defines
+                                   WCgf.package -- the default textdomain 
+                                   0            -- skip depth
+                                   Nothing      -- no define sig
+                                   []           -- or body
+                                   False        -- not in a string
+                                   ""           -- no history
 
 ----------------------------------------------------------------------------------
 -- Types for dealing with #define
@@ -128,151 +128,190 @@ data DefSig = DefSig
     {
       defName :: !String
     , defArgs :: ![String]
+    , defDomain :: !String
+    , defHistory :: !String
     }
         deriving (Eq, Show)
 
------------------------------------------------------------
------------------------------------------------------------------------------------
--- expand a path according to the following rules from
--- http://wiki.wesnoth.org/PreprocessorRef
--- 1. pathname - a path under the wesnoth data/ subdirectory
--- 2. ~pathname - a path relative to the data/ subdirectory of the user's data directory
--- 3. ./pathname - a path relative to the directory containing the file in which the pattern appears.
-
-expandPath _ ('~':path) = expandPath' $ userDataPath </> path
-expandPath rel ('.':('/':path)) = expandRelativePath rel path
-expandPath _ path = expandPath' $ systemDataPath </> path
-
-expandRelativePath "" path = error $ "Invalid relative path name ./" ++ path
-expandRelativePath f path = expandPath' $ takeDirectory f </> path
-
-expandPath' filePath = do
-    dir <- doesDirectoryExist filePath
-    if dir
-    then expandDirectory filePath
-    else return $ checkFile filePath (takeExtension filePath)
-
-checkFile f ".cfg" = [f]
-checkFile _ _ = []
-
-expandPath'' _ ".." = return []
-expandPath'' _ "." = return []
-expandPath'' p f = expandPath' $ normalise $ p </> f
-
-expandDirectory filePath = do
-    let _main = normalise $ filePath </> "_main.cfg"
-    exist <- doesFileExist $ _main
-    if exist
-    then return $ [_main]
-    else expandDirectory' filePath
-
-expandDirectory' filePath = do
-    c <- getDirectoryContents filePath
-    let (i,c') = L.partition ((==) "_initial.cfg") c
-    let (f,c'') = L.partition ((==) "_final.cfg") c'
-    i' <- mapM (expandPath'' filePath) $ i 
-    f' <- mapM (expandPath'' filePath) $ f 
-    c''' <- mapM (expandPath'' filePath) $ L.sort c'' 
-    return $ concat i' ++ concat c''' ++ concat f'
-
-preProcessWmlFile f = driver $ initState f
-
-driver :: PreProcessorState -> IO (String)
-driver (PreProcessorState (Just path) [] defines lpps pd pb) = do
-    files <- expandPath "" path
-    driver $ mkPPState Nothing (L.map File files) defines lpps pd pb
-driver (PreProcessorState (Just path) work@((Cont _ file): _) defines lpps pd pb) = do
-    files <- expandPath file path
-    driver $ mkPPState Nothing (L.map File files ++ work) defines lpps pd pb
-driver (PreProcessorState Nothing [] _ _ _ _) = return ""
-driver (PreProcessorState Nothing ((Cont cont _): _) defines _ _ _) = do
-    let (pps', result) = cont defines 
-    result' <- driver pps'
-    return $ result ++ result'
-
-driver (PreProcessorState Nothing ((File file): work) defines lpps pd pb) = do
-    s <- readFileUtf8 file
-    let pps = mkPPState Nothing work defines lpps pd pb
-    let (pps', result) = preProcessWmlFile' pps file s
-    result' <- driver pps'
-    return $ result ++ result'
-
-preProcessWmlFile' st n s = do
-    case runParser preProcessWmlFile'' st n s of
+preProcessWmlFile st n s = do
+    case runParser preProcessWmlFile' st n s of
         Right r -> r
         Left e -> error $ show e
 
-preProcessWmlFile'' = do
-    l <- lineInfo
-    r <- preProcessWml
+preProcessWmlFile' = do
     st <- getState
-    return (st, l ++ r)
+    l <- if (inString st)
+         then return ""
+         else lineInfo
+    r <- preProcessWml
+    st' <- getState
+    return (st', l ++ r)
 
-lineInfo = do
+historyItem = do
     pos <- getPosition
-    return $ "\n#line \"" ++ (sourceName pos) ++ "\" " 
-                          ++ (show $ sourceLine pos) ++ " " 
-                          ++ (show $ sourceColumn pos) ++ "\n"
+    return (" " ++ (show $ (sourceLine pos)) ++ " " ++ sourceName pos)
+
+getHistory Nothing = do
+    st <- getState
+    h <- historyItem
+    return $ "\376line" ++ h ++ (history st) ++ "\n"
+getHistory (Just def) = do
+    st <- getState
+    h <- historyItem
+    return $ "\376line" ++ (defHistory (sig def)) ++ h ++ (history st) ++ "\n"
+
+lineInfo = getHistory Nothing
 
 
--- preProcess consumes one of more source chars from the input and returns a string
--- The string can contain
--- 1. The character consumed
--- 2. A new line i.e. when skipping a failed If branch
--- 3. The result of a substition.
--- It is assumed preProcess will called repeatedly on given input and the results
--- concat'ed to form the result of the preProcess all the input.
-
+preProcessWml :: PreProcessorParser
 preProcessWml = do
     st <- getState
-    preProcessWml' $ state st
-
-preProcessWml' s@(TextDomain :_ ) = do
-    popLPPState
-    st <- getState
-    cs <- preProcessWml' $ state st
-    return $ "textdomain" ++ cs
-preProcessWml' s = do
     cs <- getInput
-    preProcessWml'' s cs
+    preProcessWml' (skippingDepth st) cs
 
-preProcessWml'' s [] = return ""
-preProcessWml'' s ('{': _) = char '{' *> substitute '}'
-
-preProcessWml'' s _ = preProcessWml''' s
-
-preProcessWml''' s = do
-    c <- process s
-    st <- getState
-    cs <- preProcessWml' $ state st
-    return $ (c:cs)
-
-check :: CharParser PreProcessorState String
-check = do
-    s <- getState
-    unexpected $ "current state " ++ (show $ state s)
+preProcessWml' :: Int -> String -> PreProcessorParser
+preProcessWml' 0 [] = do
     return ""
+preProcessWml' 0 ('{': _) = char '{' *> substitute '}'
+preProcessWml' 0 ('#': cs) = do
+    st <- getState
+    if inString st
+    then preProcessWml' 0 ('_':cs) -- ignore the #
+    else char '#' *> directive 0
+preProcessWml' 0 ('<': cs) = do
+    anyChar
+    quoted <- preprocessQuoted 0 '<' cs
+    inp <- getInput;
+    rest <- preProcessWml' 0 inp
+    return $ quoted ++ rest
+preProcessWml' 0 (_: cs) = do
+    c <- anyChar
+    st <- getState
+    case pendingDefine st of
+        Nothing ->  if c == '"'
+                    then do { setState $ toggleInString st;
+                              rest <- preProcessWml' 0 cs;
+                              return (c:rest)
+                            }
+                    else do { rest <- preProcessWml' 0 cs;
+                              return (c:rest)
+                            }
+        _ -> do { b <- many $ noneOf "#";
+                  pendBody b;
+                  inp <- getInput;
+                  preProcessWml' 0 inp
+                }
+preProcessWml' _ [] = return ""
+preProcessWml' sd ('#': _) = do
+    st <- getState
+    if inString st
+    then skip sd  
+    else char '#' *> char '#' *> directive sd
+preProcessWml' sd ('"':_) = do
+    st <- getState
+    setState $ toggleInString st
+    anyChar
+    skip sd
+preProcessWml' sd _ = skip sd
+
+preprocessQuoted 1 '>' ('>' : cs) = do
+    anyChar
+    return ">>"
+preprocessQuoted 0 '<' ('<':cs) = do
+        anyChar
+        frag <- many $ noneOf "<>"
+        c <- anyChar
+        inp <- getInput
+        rest <- preprocessQuoted 1 c inp
+        return $ "<<" ++ frag ++ rest
+preprocessQuoted 0 '<' (_:cs) = do
+        c <- anyChar
+        return "<"
+preprocessQuoted n c1 (c2:cs) = do
+    anyChar
+    let pat = [c1,c2]
+    let n' = case pat of
+                 "<<" -> n + 1
+                 ">>" -> n -1
+                 _ -> n
+    frag <- many $ noneOf "<>"
+    c <- anyChar
+    inp <- getInput
+    rest <- preprocessQuoted n' c inp
+    return $ pat ++ frag ++ rest
+    
+continue sd = do
+    inp <- getInput
+    preProcessWml' sd inp
+
 ----------------------------------------------------------------------
 -- Substitution - this can be macro expansion or file inclusion
 -- the text '{xxxx}' gets substituted.
 -- NB. We have already consumed the leading '{'
--- We don't deal with nested substitions ....
 ----------------------------------------------------------------------
-
+substitute :: Char -> PreProcessorParser
 substitute r = do
-    (h : t) <- spaces *> manyTill substituteItem (char r)
-    st <- getState
-    d <- return $ M.lookup h (defines st)
-    substitute' d h t
+    items <- spaces *> manyTill substituteItem (char r)
+    case items of
+        (h:t) -> do { st <- getState;
+                      d <- return $ M.lookup h (defines st);
+                      substitute' d h t
+                    }
+        [] -> do { pos <- getPosition;
+                   error $ "empty {} not allowed " ++ show pos
+                 }
 
-substituteItem =
-        char '(' *> (substituteItem' '(' ')') <* spaces
-    <|> char '{' *> (substituteItem' '{' '}') <* spaces
-    <|> many (noneOf " ()}}\n\r\t" ) <* spaces
+substituteItem :: PreProcessorParser
+substituteItem = 
+        spaces *> bracketItem <* spaces
+    <|> braceItem <* spaces
+    <|> simpleQuotedString <* spaces
+    <|> translatableString <*spaces
+    <|> many (noneOf " (){}\n\r\t") <* spaces
 
+bracketItem = char '(' *> substituteBracketItem' '(' ')' 
+
+braceItem = char '{' *> substituteItem' '{' '}'
+
+simpleQuotedString = do
+    char '"'
+    s <- manyTill (noneOf "\"") (char '"')
+    r <- maybeQuotedString
+    return $ ('"':s) ++ r ++ "\""
+
+simpleQuotedString' = do
+    char '"'
+    s <- manyTill (noneOf "\"") (char '"')
+    r <- maybeQuotedString
+    return $ s ++ r
+
+maybeQuotedString =
+        do { s <- simpleQuotedString'; return ('"' : s)}
+    <|> return ""
+
+translatableString = do
+    char '_' 
+    spaces 
+    s <- simpleQuotedString
+    return $ ('_':s)
+
+substituteItem' :: Char -> Char -> PreProcessorParser
 substituteItem' l r = do
-    items <- manyTill substituteItem (char r)
-    return $ [l] ++ concat items ++ [r]
+    items <- spaces *> manyTill substituteItem (char r)
+    case items of
+        [] -> do { pos <- getPosition;
+                   error $ "empty {} not allowed " ++ show pos
+                 }
+        (h : t) -> return $ [l] ++ items ++ [r]
+	           where items = h ++ foldr (\x y -> (' ': x ++ y)) "" t
+
+substituteBracketItem' l r = do
+    items <- spaces *> manyTill substituteItem (char r)
+    case items of
+        [] -> return [l,r]
+        (h : t) -> return $ [l] ++ items ++ [r]
+	           where items = h ++ foldr (\x y -> (' ': x ++ y)) "" t
+    
 
 type Continuation = DefMap -> (PreProcessorState, String)
 
@@ -280,36 +319,88 @@ substitute' Nothing pat _ = do
     st <- getState
     pos <- getPosition
     let file= sourceName pos
-    i <- getInput
-    let preProcessWmlFile = do
+    inp <- getInput
+    let landt = do
+        if (inString st)
+        then return ("","")
+        else do
+             {
+               linfo <- lineInfo;
+               return (linfo, "\376textdomain " ++ (domain st) ++ "\n")
+             }
+    let preProcessWmlFilePostInclude = do
             setPosition pos
-            setInput i
-            preProcessWmlFile''
+            setInput inp
+            (l , td) <- landt
+            r <- preProcessWml
+            st' <- getState
+            return (st', l ++ td ++ r)
     let cont d = do 
-            let pps = mkPPState (path st) (work st) d
-                                (state st) (pendingDefine st) (pendingBody st)
-            case runParser preProcessWmlFile pps "" "" of
+            let pps = updateDefineMap st d -- NB this closes over the history at the point of inclusion
+                                           -- so no need for an explicit pop.
+            case runParser preProcessWmlFilePostInclude pps "" "" of
                 Right r -> r
                 Left e -> error $ show e
-    let pps = mkPPState (Just pat) ((Cont cont file) : (work st)) (defines st) [Top] Nothing []
+    hItem <- historyItem
+    let h = hItem ++ history st
+    let pps = PreProcessorState (Just pat) -- tell the driver to preprocess pat
+                                ((Cont cont file) : (work st)) -- push the continuation to outstanding work
+                                (defines st) -- use the defines currently in play
+                                (domain st) -- use the current text domain - this might be wrong
+                                0 -- reset skip depth
+                                Nothing -- no outstanding define
+                                []      -- or body
+                                (inString st) -- this will suppress auto-emission of lineinfo and textdomain
+                                              -- we might not want this if the string parser deals with this
+                                              -- properly. 
+                                h -- updated history to reflect 'includer'
     setState pps
     return ""
-substitute' (Just d) pat args = do
-    let scs = substituteArgs  (defArgs (sig d)) args (body d)
+substitute' (Just def) pat args = do
+    let md = (defDomain (sig def))
     st <- getState
-    let s = state st
-    let pps = mkPPState Nothing [] (defines st) [Top] Nothing []
-    let scs' = case runParser preProcessWml pps "" scs of
+    let d = (domain st)
+    mh <- if (inString st) then return "" else getHistory (Just def)
+    h <- if (inString st) then return "" else lineInfo
+    let (mtd, td) = if (inString st)
+                    then ("","")
+                    else ("\376textdomain " ++ md ++ "\n", 
+                          "\376textdomain " ++ d ++ "\n")
+    scs <- substituteArgs  (defArgs (sig def)) args (body def)
+    let pps = PreProcessorState Nothing -- no files do deal with
+                                [] -- no outstanding work
+                                (defines st) -- use current set of defines for futher expansions
+                                d -- use current text domain
+                                0 -- reset skip depth
+                                Nothing -- no outstanding define
+                                []      -- or body
+                                True    -- suppress auto lineinfo and domain emission  
+                                (history st) -- use current history
+    {-- 
+     ** this is BROKEN ** 
+     ** It doesn't deal with file inclusion as an argument to a macro expnasion.
+     ** Maybe this (sensibly) doesn't occur. But ... trouble in waiting
+    --}
+    let scs' = case runParser preProcessWml pps pat scs of
                    Right r -> r
                    Left e -> fail $ show e
-    cs <- preProcessWml' s
-    return $ scs' ++ cs
+    let sd = skippingDepth st
+    inp <- getInput
+    cs <- preProcessWml' sd inp
+    return $ mh ++ mtd ++ scs' ++ h ++ td ++ cs
 
+substituteArgs [] [] b =  return b
+substituteArgs [] _ _ = do
+    pos <- getPosition
+    error $ "Too many arguments supplied to macro." ++ show pos
+-- substituteArgs (x:xs) [] b = substituteArgs xs [] (replace x [] b)
+substituteArgs (x:xs) [] _ = do
+    pos <- getPosition
+    error $ "Too few arguments supplied to macro." ++ show pos
+substituteArgs (x:xs) (y:ys) b = substituteArgs xs ys (substituteArg x y b)
 
-
-substituteArgs [] _ b = b
-substituteArgs (x:xs) [] b = substituteArgs xs [] (replace x [] b)
-substituteArgs (x:xs) (y:ys) b = substituteArgs xs ys (replace x y b)
+substituteArg x ('(':y) b = substituteArg x (L.init y) b
+substituteArg x y b = replace x y b
 
 replace _ _ [] = []
 replace old new xs@(y:ys) =
@@ -320,60 +411,51 @@ replace old new xs@(y:ys) =
 -----------------------------------------------
 -- non-substitution code 
 ----------------------------------------------
+skip :: Int -> PreProcessorParser
+skip sd = do
+    many (noneOf "#\"") 
+    inp <- getInput;
+    preProcessWml' sd inp
 
-process s = do
-    c <- anyChar
-    process' s c
-
-process' s '#' = directive s
-process' s c = processChar s c 
-
-processChar s@(SkippingIf : _) c =  skip s
-processChar s@(SkippingElse : _)  c = skip s
-processChar s c = do
-    st <- getState
-    processChar' s c (pendingDefine st)
-
-skip s = many (noneOf "#") *> char '#' *> directive s
-
-processChar' s c Nothing = return c
-processChar' s c _ = do
-    b <- many (noneOf "\n\r#")
-    pendBody ((c:b) ++ "\n")
-    (char '#' *> directive s) <|> (restOfLine *> retnl)
-
-directive s =
-        char ' ' *> comment
-    <|> try (string "textdomain") *> textDomain s
-    <|> try (char 'd' *> define s)
-    <|> try (char 'i' *> ifDirective s)
-    <|> try (char 'e' *> elseEnd s)
-    <|> try (char 'u' *> undef s)
-    <|> comment -- hmm seems like there isn't always a space first thing
+directive :: Int -> PreProcessorParser
+directive sd =
+        try (char 't' *> textDomain sd)
+    <|> try (char 'd' *> define sd)
+    <|> try (char 'i' *> ifDirective sd)
+    <|> try (char 'e' *> elseEnd sd)
+    <|> try (char 'u' *> undef sd)
+    <|> comment sd -- hmm seems like there isn't always a space first thing
     <?> "preprocessor directive"
 
-comment = do
+comment sd  = do
     restOfLine
-    retnl
+    continue sd
 
-lineEnd = eol <|> (eof *> return '\n')
+restOfLine = many (noneOf "\n")
 
-restOfLine = many (noneOf "\n") <* eol -- lineEnd
+textDomain 0 = do
+    string "extdomain"
+    s <- symbol
+    st <- getState
+    setState $ updateDomain st s
+    rest <- continue 0
+    return $ "#textdomain " ++ s ++ rest
+textDomain sd = skip sd
 
-textDomain s = pushLPPState TextDomain s *> return '#'
-
-define s@(SkippingIf : _) =  skip s
-define s@(SkippingElse  :_) =  skip s
-define s  = do
+define 0  = do
     string "efine"
     s <- defineSig
     pendDefine s
-    retnl
+    continue 0
+define sd =  skip sd
 
 defineSig = do
     l <- restOfLine
+    anyChar -- remove \n now so getHistory references first line of body of define
     (name, args) <- pdefsig l
-    return (DefSig name args)
+    st <- getState
+    hItem <- historyItem
+    return $ DefSig name args (domain st) (hItem ++ (history st))
 
 pdefsig l = pdefsig' $ words l
 
@@ -387,147 +469,123 @@ pdefargs (x:xs) = (("{" ++ x ++ "}"): pdefargs xs)
 
 pendDefine s = do
     st <- getState
-    setState $ mkPPState (path st) (work st) (defines st)
-                         (Defining : (state st)) (Just s) []
+    setState $ updateDefSig st (Just s)
 
 pendBody b = do
     st <- getState
-    setState $ mkPPState (path st) (work st) (defines st)
-                         (state st) (pendingDefine st) (b : (pendingBody st))
+    setState $ updateDefBody st (b : (pendingBody st))
 
 updateDefines = do
     st <- getState
     let (Just s) = pendingDefine st
-    let body = concat $ reverse $ ("\n" : (pendingBody st))
+    let body = dropWhile ((==) ' ') $ concat $ reverse $ (pendingBody st)
     nm <- return $ M.insert (defName s) (Define s body) (defines st)
-    setState $ mkPPState (path st) (work st) nm
-                         (state st) Nothing []
+    setState $ PreProcessorState (path st) (work st) nm (domain st)
+                                 (skippingDepth st) Nothing [] 
+                                 (inString st) (history st)
 
-ifDirective s = do
+ifDirective sd = do
     char 'f'
-    ifDirective' s
+    ifDirective' sd
 
-ifDirective' s@(SkippingIf : _) =  pushLPPState SkippingIf  s *> skip s
-ifDirective' s@(SkippingElse  :_) =  pushLPPState SkippingIf s *> skip s
--- ifDirective' s@(Defining  :_) =  unexpected ": #if not supported inside #define"
-ifDirective' s =
-        char 'd' *> ifdef s
-    <|> char 'h' *> ifhave s
-    <|> char 'v' *> ifver s
-    <|> char 'n' *> ifn s
+ifDirective' sd =
+        char 'd' *> ifdef sd
+    <|> char 'h' *> ifhave sd
+    <|> char 'v' *> ifver sd
+    <|> char 'n' *> ifn sd
 
-ifdef s = if' "ef" defCondition evalDefCondition s
-ifndef s = ifn' "ef" defCondition evalDefCondition s
+ifdef sd = if' sd "ef" defCondition evalDefCondition id
+ifndef sd = if' sd "ef" defCondition evalDefCondition not
 
 defCondition = symbol <* restOfLine
 
 symbol = spaces *> many (noneOf " \n\r\t")
 
-evalDefCondition s = do
-    st <-getState
-    case M.member s (defines st) of
-        True -> return True
-        _ -> return False
+evalDefCondition c st = M.member c (defines st)
 
-ifhave s = if' "ave" haveCondition evalHaveCondition s
-ifnhave s = ifn' "ave" haveCondition evalHaveCondition s
+ifhave sd = undefined
+ifnhave sd = undefined
+{--
+ifhave sd = if' sd "ave" haveCondition evalHaveCondition (not.not)
+ifnhave sd = if' sd "ave" haveCondition evalHaveCondition not
 
 haveCondition = undefined
 
 evalHaveCondition = undefined
+--}
 
-ifver s = if' "er" verCondition evalVerCondition s
-ifnver s = ifn' "er" verCondition evalVerCondition s
+ifver sd = undefined
+ifnver sd = undefined
+{--
+ifver sd = if' sd "er" verCondition evalVerCondition not.not
+ifnver sd = if' sd "er" verCondition evalVerCondition not
 
 verCondition = undefined
 
 evalVerCondition = undefined
+--}
 
 ifn s =
         char 'd' *> ifndef s
     <|> char 'h' *> ifnhave s
     <|> char 'v' *> ifnver s
 
-if' r c e s = do
-    string r
-    pred <- c
-    b <- e pred
-    pushIfState b s
-    retnl
+type IfConditionParser = PreProcessorParser
+type IfConditionEvaluator = String -> PreProcessorState -> Bool
+type Sense = Bool -> Bool
 
-ifn' r c e s = do
-    string r
-    pred <- c
-    b <- e pred
-    pushIfState (not b) s
-    retnl
-
-elseEnd s =
-        char 'l' *> elseDir s
-    <|> string "nd" *> end s
-
-elseDir s = do
-    string "se"
+if' :: Int -> String -> IfConditionParser -> IfConditionEvaluator -> Sense -> PreProcessorParser
+if' 0 key cond eval sense = do
+    c <- string key *> cond 
     st <- getState
-    switchIfState s st
+    let skip = sense $ eval c st
+    let skipd = b2d skip
+    setState $ updateSDepth st skipd
+    continue skipd
+if' sd _ _ _ _ = changeSkipDepth $ sd + 1
+
+b2d True = 0
+b2d False = 1
+
+changeSkipDepth skipd= do
+    st <- getState
+    setState $ updateSDepth st skipd
+    continue skipd
+
+elseEnd sd =
+        char 'l' *> string "se" *> else' sd
+    <|> string "nd" *> end sd
+
+else' 0 = changeSkipDepth 1
+else' 1 = changeSkipDepth $ 0
+else' sd = skip sd
+
+end sd =
+        char 'i' *> char 'f' *> endif sd
+    <|> enddef sd
+
+endif 0 = do
     restOfLine
-    retnl
+    continue 0
+endif sd = changeSkipDepth $ sd - 1
 
-
-end s =
-        char 'i' *> endif s
-    <|> enddef s
-
-endif s = do
-    restOfLine
-    endif' s
-    retnl
-
-endif' (ProcessingIf : _) = popLPPState
-endif' (SkippingIf : _) = popLPPState
-endif' (ProcessingElse : _) = popLPPState
-endif' (SkippingElse : _) = popLPPState
-endif' _ = unexpected ": #endif nested incorrectly"
-
-enddef s = do
+enddef 0 = do
     string "def"
-    st <- getState
-    enddef' s
-    restOfLine
-    retnl
-
-enddef' (SkippingIf : _) = popLPPState
-enddef' (SkippingElse : _) = popLPPState
-enddef' (Defining : _) = do
     updateDefines
-    popLPPState
-enddef' _ = unexpected ": #enddef"
+    restOfLine
+    continue 0
+enddef sd = skip sd
 
-undef (SkippingIf : _) = restOfLine *> retnl
-undef (SkippingElse : _) = restOfLine *> retnl
-undef s = do
+undef 0 = do
     string "ndef"
     l <- restOfLine
     undef' $ words l
-    retnl
+    continue 0
+undef sd = skip sd
 
 undef' [] = unexpected ": #undef missing symbol"
 undef' (k: _) = do
     st <- getState
     nm <- return $ M.delete k (defines st)
-    return $ mkPPState (path st) (work st) nm
-                       (state st) (pendingDefine st) (pendingBody st)
+    return $ updateDefineMap st nm
 
-retnl = return '\n'
-
-{--
-eol =   
-        try (string "\n\r")
-    <|> try (string "\r\n")
-    <|> string "\n"
-    <|> string "\r"
---}
-eol = char '\n'
-
--- A little utility
-pp x y = do { p <- preProcessWmlFile x; writeFileUtf8 y p;}

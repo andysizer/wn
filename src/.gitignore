@@ -1,0 +1,8 @@
+*~
+*.o
+*.hi
+*.exe
+*.prof
+*.ps
+*.parse
+*.pre

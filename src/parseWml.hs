@@ -2,6 +2,7 @@
 
 module ParseWml
 (
+  parseWml
 ) 
     where
 
@@ -18,6 +19,8 @@ data Node = Node
     }
         deriving (Eq, Show)
 
+emptyNode = NNode $ N $ Node "" []
+
 -- merge nodes 
 data MergeNode = MergeNode
     {
@@ -28,42 +31,68 @@ data MergeNode = MergeNode
 
 type NodeBody = [NodeItem]
 
-data NodeItem = NAtt Attribute
-              | NMatt Mattribute 
-              | NNode Node
-              | NMNode MergeNode
+data WmlConfig = N Node
+               | M MergeNode
         deriving (Eq, Show)
 
+data NodeItem = NM ()
+              | NH ()
+              | NAtt Attribute
+              | NMatt Mattribute 
+              | NNode WmlConfig
+        deriving (Eq, Show)
+
+parseWml s = parse topLevel "" s
+
+-- topLevel = 
+topLevel = manyTill (spaces *> topLevelItem) eof
+
+topLevelItem =
+        marker *> sourceOrDomain *> spaces *> return emptyNode  -- deal with \376
+    <|> hash *> domain *> spaces *> return emptyNode            -- deal with #
+    <|> topLevelNode
+
+sourceOrDomain =
+        char 'l' *> sourceInfo
+    <|> domain
+
+sourceInfo = do
+    many (noneOf "\n")
+    anyChar
+
+domain = do
+    many (noneOf "\n")
+    anyChar
 
 -- Main node parser
--- need type decl to get it to type check
-parseNode :: (a -> NodeItem) -> (String -> NodeBody -> a) -> CharParser () NodeItem
-parseNode c1 c2 =
-    do start <- tagName
-       body <- nodeBody
-       end <- tagName
-       mkNode c1 c2 start body end
+parseNode :: (a -> WmlConfig) -> (String -> NodeBody -> a) -> CharParser () NodeItem
+parseNode c1 c2 = do
+    start <- tagName
+    body <- nodeBody
+    end <- tagName
+    mkNode c1 c2 start body end
+
+tagName = manyTill namechars rb <* spaces
 
 mkNode c1 c2 s b e
-    | s == e = return $ c1 $ c2 s b
-    | otherwise 
-    = unexpected (": end tag '" ++ e ++ "' does not match '" ++ s ++ "'")
+    | s == e = return $ NNode $ c1 $ c2 s b
+    | otherwise = unexpected (": end tag '" ++ e ++ "' does not match '" ++ s ++ "'")
 
 -- 'constructors' for different node types
-node = parseNode NNode Node
+node = parseNode N Node
 
-mergeNode = parseNode NMNode MergeNode
+mergeNode = parseNode M MergeNode
 
 -- Top Level Node parser 
-topLevelNode = 
-    do spaces
-       lb
-       (NNode n) <- node
-       return n
+topLevelNode = do
+    lb
+    internalNode
 
 -- parsing node bodies. NB no 'try's.
 nodeBody = 
         lb *> maybeEndBody
+    <|> marker *> sourceOrDomain *> spaces *> nodeBody
+    <|> hash *> domain *> spaces *> nodeBody
     <|> attributeThenNodeBody
 
 -- maybeEndBody
@@ -78,11 +107,11 @@ maybeEndBody =
 
 -- attributeThenNodeBody
 -- we didn't see [, so must be an attribute followed by ...
-attributeThenNodeBody =
-    do a <- attribute
-       spaces
-       b <- nodeBody
-       return (a : b)
+attributeThenNodeBody = do
+    a <- attribute
+    spaces
+    b <- nodeBody
+    return (a : b)
 
 internalNode =
         char '+' *> mergeNode
@@ -103,104 +132,132 @@ data Mattribute = Mattribute
     }
         deriving (Eq, Show)
 
-data AttributeValue = Translatable String
-                    | Substitution String
+attribute = do
+    spaces
+    key <- attName
+    keys <- maybeKeys
+    finishAtrribute key keys
+
+attName = many namechars <* spaces
+
+maybeKeys = do
+        char ','
+        spaces
+        key <- attName
+        keys <- maybeKeys
+        return (key : keys)
+    <|> return [] 
+
+finishAtrribute key [] = do
+    char '='
+    spaces
+    value <- attributeValue
+    return $ NAtt $ Attribute key value
+finishAtrribute key keys = do
+    char '='
+    spaces
+    value <- attributeValue
+    values <- maybeValues
+    return $ NMatt $ Mattribute (key:keys) (value:values)
+
+maybeValues = do 
+        char ','
+        spaces
+        value <- attributeValue
+        values <- maybeValues
+        return (value : values)
+    <|> return [] 
+
+data AttributeValue = Variable String
                     | Formula String
-                    | String String
+                    | String [StringValue]
         deriving (Eq, Show)
 
-attribute = 
-    do spaces
-       key <- attName
-       keys <- maybeKeys
-       finishAtrribute key keys
+attributeValue =
+        marker *> sourceOrDomain *> spaces *> attributeValue
+    -- <|> Variable <$> wmlVariableValue
+    <|> String <$> leadingUnderscore
+    <|> Formula <$> formulaValue
+    <|> String <$> stringValue
+    <|> String <$> defaultAttValue
 
-maybeKeys =
-        do char ','
-           spaces
-           key <- attName
-           keys <- maybeKeys
-           return (key : keys)
-    <|> return [] 
+--wmlVariableValue = char '$' *> many wmlVarChars <* spaces
 
-finishAtrribute key [] = 
-   do char '='
-      spaces
-      value <- attValue
-      return $ NAtt $ Attribute key value
-finishAtrribute key keys = 
-   do char '='
-      spaces
-      value <- attValue
-      values <- maybeValues
-      return $ NMatt $ Mattribute (key:keys) (value:values)
+leadingUnderscore = do
+    try(char '_' *> noneOf " \"\n[" >>= leadingUnderscore')
 
-maybeValues = 
-        do char ','
-           spaces
-           value <- attValue
-           values <- maybeValues
-           return (value : values)
-    <|> return [] 
+leadingUnderscore' c = do
+    v <- many  (noneOf "\n[")
+    return $ [SimpleString (c:v)]
 
-attValue = 
-        char '_' *> translatableAttValue
-    <|> char '$' *> substitionAttValue
-    <|> char '"' *> quotedAttValue
-    <|> defaultAttValue
-    <?> "Invalid attribute value"
 
-translatableAttValue = char '"' *> (Translatable <$> pString)
+formulaValue = try(string "\"$(") *> many (noneOf ")") <* anyChar
 
-substitionAttValue = Substitution <$> wmlVarName
+data StringValue = Translatable String
+                 | QuotedString String
+                 | SimpleString String
+        deriving (Eq, Show)
+ 
+stringValue = do 
+    s <- quotedStringValue
+    r <- stringValueRest
+    return (s:r)
 
-quotedAttValue = 
-        char '$' *> (Formula <$> formulaAttValue) <* (spaces *> char '"')
-    <|> String <$> quotedAttValue'
-
-quotedAttValue' = 
-    do s <- pString
-       spaces
-       r <- pConcatString
-       return $ s ++ r
-
-pString = 
-    do s <- anyChar `manyTill` (char '"')
-       r <- pString'
-       return $ s ++ r
-
-pString' = 
-        char '"' *> ((:) <$> (return '"') <*> pString)
+stringValueRest = 
+        marker *> sourceOrDomain *> spaces *> stringValueRest
+    <|> try(plus) *> stringValueRest'
     <|> return []
 
-pConcatString = 
-        plus *> spaces *> char '"' *> quotedAttValue'
-    <|> return []
-            
+stringValueRest' = 
+        marker *> sourceOrDomain *> spaces *> stringValueRest'
+    <|> stringValue
 
-formulaAttValue = between (char '(') (char ')') (many (noneOf ")"))
+quotedStringValue = 
+        translatableString
+    <|> quotedString
 
--- TODO should we 'trim' this. What about the others?
-defaultAttValue = String <$> anyChar `manyTill` eol
+translatableString = do
+    char '_' 
+    spaces 
+    s <- simpleQuotedString
+    return $ Translatable s
 
-tagName = manyTill namechars rb <* spaces
-attName = many namechars <* spaces
-wmlVarName = many namechars <* spaces
+quotedString = do
+    s <- simpleQuotedString
+    return $ QuotedString s
 
-namechars' = ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9'] ++ ['_']
-namechars = oneOf namechars' 
+simpleQuotedString = do
+    char '"'
+    s <- manyTill (noneOf "\"") (char '"')
+    r <- maybeQuotedString
+    return $ s ++ r
+
+maybeQuotedString =
+        do { s <- simpleQuotedString; return ('"' : s)}
+    <|> return ""
+
+defaultAttValue = do
+    v <- many  (noneOf " \n[")
+    r <- defaultAttValueRest
+    return $ [SimpleString $ v ++ r]
+defaultAttValueRest =
+        char ' ' *> do {r <- many  (noneOf "\n["); return (' ': r) }
+    <|> char '[' *> do {r <- many  (noneOf " \n"); return ('[': r) }
+    <|> return ""
 
 lb = char '['
 rb = char ']'
 
-plus = char '+'
+namechars' = ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9'] ++ ['_','[',']','$']
+namechars = oneOf namechars' 
 
-eol =   
-        try (string "\n\r")
-    <|> try (string "\r\n")
-    <|> string "\n"
-    <|> string "\r"
-    <?> "end of line"
+wmlVarChars' = namechars' ++ ['.']
+--wmlVarChars = oneOf wmlVarChars'
+
+marker = char '\376'
+hash = char '#'
+
+plus = spaces *> char '+' <* spaces
 
 t1 = "[tag]"
 t2 = "key"
@@ -223,3 +280,6 @@ t19= "[tag]\n     key=\"va\" + \"lue\"\n   [+xxx]\n     key1=value1\n[/xxx] \n [
 t20= "[tag]\n     key=_\"value\"\n   [+xxx]\n     key1=value1\n[/xxx] \n [/tag]"
 t21= "[tag]\n     key=$value\n   [+xxx]\n     key1=_\"value1\"\n[/xxx] \n [/tag]"
 t22= "[tag]\n     key=\"$(value)\"\n   [+xxx]\n     key1=_\"value1\"\n[/xxx] \n [/tag]"
+
+
+p = parseWml
