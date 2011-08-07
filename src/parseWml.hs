@@ -38,7 +38,6 @@ data WmlConfig = N Node
 data NodeItem = NM ()
               | NH ()
               | NAtt Attribute
-              | NMatt Mattribute 
               | NNode WmlConfig
         deriving (Eq, Show)
 
@@ -117,15 +116,8 @@ internalNode =
         char '+' *> mergeNode
     <|> node
 
--- Attributes
+-- Attribute
 data Attribute = Attribute
-    {
-      aKey  :: String
-    , aValue :: AttributeValue
-    }
-        deriving (Eq, Show)
-
-data Mattribute = Mattribute
     {
       mKeys  :: [String]
     , mValues :: [AttributeValue]
@@ -136,7 +128,7 @@ attribute = do
     spaces
     key <- attName
     keys <- maybeKeys
-    finishAtrribute key keys
+    finishAtrribute (key:keys)
 
 attName = many namechars <* spaces
 
@@ -148,24 +140,22 @@ maybeKeys = do
         return (key : keys)
     <|> return [] 
 
-finishAtrribute key [] = do
-    char '='
-    spaces
-    value <- attributeValue
-    return $ NAtt $ Attribute key value
-finishAtrribute key keys = do
+finishAtrribute keys = do
     char '='
     spaces
     value <- attributeValue
     values <- maybeValues
-    return $ NMatt $ Mattribute (key:keys) (value:values)
+    return $ NAtt $ Attribute keys (value:values)
 
-maybeValues = do 
-        char ','
-        spaces
-        value <- attributeValue
-        values <- maybeValues
-        return (value : values)
+maybeValues = 
+        marker *> sourceOrDomain *> spaces *> maybeValues
+    <|> do 
+        { char ',';
+          spaces;
+          value <- attributeValue;
+          values <- maybeValues;
+          return (value : values)
+        }
     <|> return [] 
 
 data AttributeValue = Variable String
@@ -237,12 +227,24 @@ maybeQuotedString =
     <|> return ""
 
 defaultAttValue = do
-    v <- many  (noneOf " \n[")
+    v <- many  (noneOf " \n[\376")
     r <- defaultAttValueRest
     return $ [SimpleString $ v ++ r]
+
+defaultAttValue' = do
+    v <- many  (noneOf " \n[\376")
+    r <- defaultAttValueRest'
+    return $  v ++ r
+
 defaultAttValueRest =
         char ' ' *> do {r <- many  (noneOf "\n["); return (' ': r) }
     <|> char '[' *> do {r <- many  (noneOf " \n"); return ('[': r) }
+    <|> marker *> sourceOrDomain *> spaces *> defaultAttValueRest'
+    <|> return ""
+
+defaultAttValueRest' =
+        char ' ' *> do {r <- many  (noneOf "\n["); return (' ': r) }
+    <|> marker *> sourceOrDomain *> spaces *> defaultAttValue'
     <|> return ""
 
 lb = char '['
@@ -251,13 +253,12 @@ rb = char ']'
 namechars' = ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9'] ++ ['_','[',']','$']
 namechars = oneOf namechars' 
 
-wmlVarChars' = namechars' ++ ['.']
---wmlVarChars = oneOf wmlVarChars'
-
 marker = char '\376'
 hash = char '#'
 
 plus = spaces *> char '+' <* spaces
+
+-----------------------------
 
 t1 = "[tag]"
 t2 = "key"

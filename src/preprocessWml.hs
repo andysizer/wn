@@ -197,7 +197,7 @@ preProcessWml' 0 (_: cs) = do
                               return (c:rest)
                             }
         _ -> do { b <- many $ noneOf "#";
-                  pendBody b;
+                  pendBody (c:b);
                   inp <- getInput;
                   preProcessWml' 0 inp
                 }
@@ -362,47 +362,49 @@ substitute' (Just def) pat args = do
     st <- getState
     pos <- getPosition
     let fileName = (sourceName pos)
-    let d = (domain st)
+    let dom = (domain st)
     mh <- if (inString st) then return "" else getHistory $ Just def
     h <- if (inString st) then return "" else lineInfo
     let (mtd, td) = if (inString st)
                     then ("","")
                     else ("\376textdomain " ++ md ++ "\n", 
-                          "\376textdomain " ++ d ++ "\n")
+                          "\376textdomain " ++ dom ++ "\n")
     b <- substituteArgs  (defArgs (sig def)) args (body def)
     let newBody = mh ++ mtd ++ b ++ h ++ td
-    let preProcessMacroExpansion = do
-        exp <- preProcessWml
-        st' <- getState
-        return (st', exp)
-    let cont1 d = do 
-        case runParser preProcessMacroExpansion st fileName newBody of
-            Right r -> r
-            Left e -> error $ show e
-
-    let preProcessPostExpansion = do
+    let addCont cont w = 
+            PreProcessorState (path st) -- tell the driver to preprocess pat
+                              ((Cont cont fileName): w)
+                              (defines st)
+                              dom -- use the current text domain - this might be wrong
+                              0 -- reset skip depth
+                              Nothing -- no outstanding define
+                              []      -- or body
+                              (inString st) 
+                              (history st)
+    pos' <- getPosition
+    inp <- getInput
+    let preProcessRest = do
+        setPosition pos'
+        setInput inp
         r <- preProcessWml
         st' <- getState
         return (st', r)
     let cont2 d = do 
         let pps = updateDefineMap st d -- NB this closes over the history at the point of inclusion
-                                           -- so no need for an explicit pop.
-        case runParser preProcessPostExpansion pps "" "" of
-            Right r -> r
-            Left e -> error $ show e
-    let newWork = ((Cont cont1 fileName) : ((Cont cont2 fileName) : (work st)))
-    let pps = PreProcessorState (path st) -- tell the driver to preprocess pat
-                                newWork
-                                (defines st) -- use the defines currently in play
-                                (domain st) -- use the current text domain - this might be wrong
-                                0 -- reset skip depth
-                                Nothing -- no outstanding define
-                                []      -- or body
-                                (inString st) -- this will suppress auto-emission of lineinfo and textdomain
-                                              -- we might not want this if the string parser deals with this
-                                              -- properly. 
-                                (history st)
-    setState pps
+        case runParser preProcessRest pps fileName newBody of
+               Right r -> r
+               Left e -> error $ show e
+    let pps = addCont cont2  (work st)
+    let preProcess = do
+        r <- preProcessWml
+        st' <- getState
+        return (st', r)
+    let cont1 d = do
+        case runParser preProcess pps fileName newBody of
+               Right r -> r
+               Left e -> error $ show e
+    let pps' = addCont cont1  (work pps)
+    setState pps'
     return ""
 
 
