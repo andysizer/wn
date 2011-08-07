@@ -315,23 +315,24 @@ substituteBracketItem' l r = do
 
 type Continuation = DefMap -> (PreProcessorState, String)
 
+landt st = do
+    if (inString st)
+    then return ("","")
+    else do
+         {
+           linfo <- lineInfo;
+           return (linfo, "\376textdomain " ++ (domain st) ++ "\n")
+         }
+
 substitute' Nothing pat _ = do
     st <- getState
     pos <- getPosition
     let file= sourceName pos
     inp <- getInput
-    let landt = do
-        if (inString st)
-        then return ("","")
-        else do
-             {
-               linfo <- lineInfo;
-               return (linfo, "\376textdomain " ++ (domain st) ++ "\n")
-             }
     let preProcessWmlFilePostInclude = do
             setPosition pos
             setInput inp
-            (l , td) <- landt
+            (l , td) <- landt st
             r <- preProcessWml
             st' <- getState
             return (st', l ++ td ++ r)
@@ -359,35 +360,51 @@ substitute' Nothing pat _ = do
 substitute' (Just def) pat args = do
     let md = (defDomain (sig def))
     st <- getState
+    pos <- getPosition
+    let fileName = (sourceName pos)
     let d = (domain st)
-    mh <- if (inString st) then return "" else getHistory (Just def)
+    mh <- if (inString st) then return "" else getHistory $ Just def
     h <- if (inString st) then return "" else lineInfo
     let (mtd, td) = if (inString st)
                     then ("","")
                     else ("\376textdomain " ++ md ++ "\n", 
                           "\376textdomain " ++ d ++ "\n")
-    scs <- substituteArgs  (defArgs (sig def)) args (body def)
-    let pps = PreProcessorState Nothing -- no files do deal with
-                                [] -- no outstanding work
-                                (defines st) -- use current set of defines for futher expansions
-                                d -- use current text domain
+    b <- substituteArgs  (defArgs (sig def)) args (body def)
+    let newBody = mh ++ mtd ++ b ++ h ++ td
+    let preProcessMacroExpansion = do
+        exp <- preProcessWml
+        st' <- getState
+        return (st', exp)
+    let cont1 d = do 
+        case runParser preProcessMacroExpansion st fileName newBody of
+            Right r -> r
+            Left e -> error $ show e
+
+    let preProcessPostExpansion = do
+        r <- preProcessWml
+        st' <- getState
+        return (st', r)
+    let cont2 d = do 
+        let pps = updateDefineMap st d -- NB this closes over the history at the point of inclusion
+                                           -- so no need for an explicit pop.
+        case runParser preProcessPostExpansion pps "" "" of
+            Right r -> r
+            Left e -> error $ show e
+    let newWork = ((Cont cont1 fileName) : ((Cont cont2 fileName) : (work st)))
+    let pps = PreProcessorState (path st) -- tell the driver to preprocess pat
+                                newWork
+                                (defines st) -- use the defines currently in play
+                                (domain st) -- use the current text domain - this might be wrong
                                 0 -- reset skip depth
                                 Nothing -- no outstanding define
                                 []      -- or body
-                                True    -- suppress auto lineinfo and domain emission  
-                                (history st) -- use current history
-    {-- 
-     ** this is BROKEN ** 
-     ** It doesn't deal with file inclusion as an argument to a macro expnasion.
-     ** Maybe this (sensibly) doesn't occur. But ... trouble in waiting
-    --}
-    let scs' = case runParser preProcessWml pps pat scs of
-                   Right r -> r
-                   Left e -> fail $ show e
-    let sd = skippingDepth st
-    inp <- getInput
-    cs <- preProcessWml' sd inp
-    return $ mh ++ mtd ++ scs' ++ h ++ td ++ cs
+                                (inString st) -- this will suppress auto-emission of lineinfo and textdomain
+                                              -- we might not want this if the string parser deals with this
+                                              -- properly. 
+                                (history st)
+    setState pps
+    return ""
+
 
 substituteArgs [] [] b =  return b
 substituteArgs [] _ _ = do

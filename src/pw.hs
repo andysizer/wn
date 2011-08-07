@@ -22,5 +22,10 @@ usage = do
     p <- getProgName
     print ("Usage: " ++ p ++ " input [outfile]")
 
-pw x y = do { p <- preProcessWmlFile x; c <- parseWml p; writeFileUtf8 y c;}
+pw x y = do 
+    p <- preProcessWmlFile x; 
+    case  parseWml p of
+        (Right r) -> writeFileUtf8 y (show r)
+        (Left e) -> print e
+
     
