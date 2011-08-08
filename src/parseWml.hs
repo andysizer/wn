@@ -110,7 +110,7 @@ attributeThenNodeBody = do
     a <- attribute
     spaces
     b <- nodeBody
-    return (a : b)
+    return (NAtt a : b)
 
 internalNode =
         char '+' *> mergeNode
@@ -119,132 +119,89 @@ internalNode =
 -- Attribute
 data Attribute = Attribute
     {
-      mKeys  :: [String]
-    , mValues :: [AttributeValue]
+      aKeys  :: [String]
+    , aValues :: [[AttributeValue]]
     }
         deriving (Eq, Show)
 
 attribute = do
     spaces
-    key <- attName
-    keys <- maybeKeys
-    finishAtrribute (key:keys)
-
-attName = many namechars <* spaces
-
-maybeKeys = do
-        char ','
-        spaces
-        key <- attName
-        keys <- maybeKeys
-        return (key : keys)
-    <|> return [] 
-
-finishAtrribute keys = do
+    keys <- attributeKeys
     char '='
     spaces
-    value <- attributeValue
-    values <- maybeValues
-    return $ NAtt $ Attribute keys (value:values)
+    values <- attributeValues
+    return $ Attribute keys values
 
-maybeValues = 
-        marker *> sourceOrDomain *> spaces *> maybeValues
-    <|> do 
-        { char ',';
-          spaces;
-          value <- attributeValue;
-          values <- maybeValues;
-          return (value : values)
-        }
-    <|> return [] 
+attributeKeys = attributeKey `sepBy1` comma
 
-data AttributeValue = Variable String
+attributeKey = many namechars <* spaces
+
+attributeValues = concatenatedAttributeValue `sepBy` comma
+
+concatenatedAttributeValue = attributeValue `sepBy` plus
+
+data AttributeValue = UnquotedString String
                     | Formula String
-                    | String [StringValue]
+                    | QuotedString String
+                    | Translatable String
+                    | Code String
         deriving (Eq, Show)
 
 attributeValue =
-        marker *> sourceOrDomain *> spaces *> attributeValue
-    -- <|> Variable <$> wmlVariableValue
-    <|> String <$> leadingUnderscore
+        annotation attributeValue
+    <|> UnquotedString <$> leadingUnderscore
     <|> Formula <$> formulaValue
-    <|> String <$> stringValue
-    <|> String <$> defaultAttValue
+    <|> QuotedString <$> quotedStringValue
+    <|> Translatable <$> translatableStringValue
+    <|> Code <$> literalCodeValue
+    <|> UnquotedString <$> unquotedStringValue
 
---wmlVariableValue = char '$' *> many wmlVarChars <* spaces
+annotation p = marker *> sourceOrDomain *> spaces *> p
+
+optionalAnnotation =
+        marker *> sourceOrDomain *> spaces *> optionalAnnotation
+    <|> return ()
 
 leadingUnderscore = do
     try(char '_' *> noneOf " \"\n[" >>= leadingUnderscore')
 
 leadingUnderscore' c = do
-    v <- many  (noneOf "\n[")
-    return $ [SimpleString (c:v)]
+    v <- many (noneOf "\n[")
+    optionalAnnotation
+    return $ ['_', c] ++ v
 
+formulaValue = try(string "\"$(") *> many (noneOf ")") <* anyChar <* optionalAnnotation
 
-formulaValue = try(string "\"$(") *> many (noneOf ")") <* anyChar
-
-data StringValue = Translatable String
-                 | QuotedString String
-                 | SimpleString String
-        deriving (Eq, Show)
- 
-stringValue = do 
-    s <- quotedStringValue
-    r <- stringValueRest
-    return (s:r)
-
-stringValueRest = 
-        marker *> sourceOrDomain *> spaces *> stringValueRest
-    <|> try(plus) *> stringValueRest'
-    <|> return []
-
-stringValueRest' = 
-        marker *> sourceOrDomain *> spaces *> stringValueRest'
-    <|> stringValue
-
-quotedStringValue = 
-        translatableString
-    <|> quotedString
-
-translatableString = do
-    char '_' 
-    spaces 
-    s <- simpleQuotedString
-    return $ Translatable s
-
-quotedString = do
-    s <- simpleQuotedString
-    return $ QuotedString s
-
-simpleQuotedString = do
+quotedStringValue = do
     char '"'
     s <- manyTill (noneOf "\"") (char '"')
-    r <- maybeQuotedString
+    r <- quotedStringValueRest
+    optionalAnnotation
     return $ s ++ r
 
-maybeQuotedString =
-        do { s <- simpleQuotedString; return ('"' : s)}
+quotedStringValueRest =
+        do { s <- quotedStringValue; return ('"' : s)}
     <|> return ""
 
-defaultAttValue = do
-    v <- many  (noneOf " \n[\376")
-    r <- defaultAttValueRest
-    return $ [SimpleString $ v ++ r]
+translatableStringValue = char '_' *> spaces *> quotedStringValue
 
-defaultAttValue' = do
-    v <- many  (noneOf " \n[\376")
-    r <- defaultAttValueRest'
-    return $  v ++ r
+literalCodeValue = do
+    char '<'
+    char '<'
+    c <- manyTill anyChar (try (string ">>"))
+    optionalAnnotation
+    return c
+    
 
-defaultAttValueRest =
-        char ' ' *> do {r <- many  (noneOf "\n["); return (' ': r) }
-    <|> char '[' *> do {r <- many  (noneOf " \n"); return ('[': r) }
-    <|> marker *> sourceOrDomain *> spaces *> defaultAttValueRest'
-    <|> return ""
+unquotedStringValue = do
+    v <- many  (noneOf ", \n[\376")
+    r <- unquotedStringValueRest
+    optionalAnnotation
+    return $ v ++ r
 
-defaultAttValueRest' =
-        char ' ' *> do {r <- many  (noneOf "\n["); return (' ': r) }
-    <|> marker *> sourceOrDomain *> spaces *> defaultAttValue'
+unquotedStringValueRest =
+        char ' ' *> do {r <- many  (noneOf "\n[\376"); return (' ': r) }
+    <|> char '[' *> do {r <- many  (noneOf " \n\376"); return ('[': r) }
     <|> return ""
 
 lb = char '['
@@ -256,7 +213,8 @@ namechars = oneOf namechars'
 marker = char '\376'
 hash = char '#'
 
-plus = spaces *> char '+' <* spaces
+comma = try(option "" (many (char ' ')) *> char ',') <* spaces
+plus = try(option "" (many (char ' ')) *> char '+') <* spaces
 
 -----------------------------
 
