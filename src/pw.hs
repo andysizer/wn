@@ -24,8 +24,7 @@ usage = do
 
 pw x y = do 
     p <- preProcessWmlFile x; 
-    case  parseWml p of
-        (Right r) -> writeFileUtf8 y (show r)
-        (Left e) -> print e
+    let r = parseWml p 
+    writeFileUtf8 y (show r)
 
     
