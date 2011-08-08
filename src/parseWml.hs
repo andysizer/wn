@@ -11,11 +11,25 @@ import Text.Parsec.Prim (unexpected)
 
 import ApplicativeParsec
 
+-- state for parser
+
+data ParseState = ParseState
+    {
+      pDomain :: !String
+    , pHistory :: !String
+    }
+        deriving (Eq, Show)
+
+initState = ParseState "" ""
+
+type WmlParser = GenParser Char ParseState [NodeItem]
+type WmlNodeParser = GenParser Char ParseState NodeItem
+
 -- default node type including top level
 data Node = Node
     {
-      nName :: String
-    , nBody :: NodeBody
+      nName :: !String
+    , nBody :: !NodeBody
     }
         deriving (Eq, Show)
 
@@ -35,20 +49,24 @@ data WmlConfig = N Node
                | M MergeNode
         deriving (Eq, Show)
 
-data NodeItem = NM ()
-              | NH ()
-              | NAtt Attribute
+data NodeItem = NAtt Attribute
               | NNode WmlConfig
         deriving (Eq, Show)
 
-parseWml s = parse topLevel "" s
+parseWml s = do
+    case runParser topLevel initState "" s of
+        Right r -> r
+        Left e -> error $ show e
 
 -- topLevel = 
+
+topLevel :: WmlParser
 topLevel = manyTill (spaces *> topLevelItem) eof
 
+--topLevelItem :: WmlNodeParser
 topLevelItem =
-        marker *> sourceOrDomain *> spaces *> return emptyNode  -- deal with \376
-    <|> hash *> domain *> spaces *> return emptyNode            -- deal with #
+        marker *> sourceOrDomain *> spaces *> topLevelItem
+    <|> hash *> domain *> spaces *> topLevelItem
     <|> topLevelNode
 
 sourceOrDomain =
@@ -64,7 +82,7 @@ domain = do
     anyChar
 
 -- Main node parser
-parseNode :: (a -> WmlConfig) -> (String -> NodeBody -> a) -> CharParser () NodeItem
+parseNode :: (a -> WmlConfig) -> (String -> NodeBody -> a) -> WmlNodeParser
 parseNode c1 c2 = do
     start <- tagName
     body <- nodeBody
@@ -78,16 +96,20 @@ mkNode c1 c2 s b e
     | otherwise = unexpected (": end tag '" ++ e ++ "' does not match '" ++ s ++ "'")
 
 -- 'constructors' for different node types
+node :: WmlNodeParser
 node = parseNode N Node
 
+mergeNode :: WmlNodeParser
 mergeNode = parseNode M MergeNode
 
--- Top Level Node parser 
+-- Top Level Node parser
+topLevelNode :: WmlNodeParser
 topLevelNode = do
     lb
     internalNode
 
 -- parsing node bodies. NB no 'try's.
+nodeBody :: WmlParser
 nodeBody = 
         lb *> maybeEndBody
     <|> marker *> sourceOrDomain *> spaces *> nodeBody
@@ -112,6 +134,7 @@ attributeThenNodeBody = do
     b <- nodeBody
     return (NAtt a : b)
 
+internalNode :: WmlNodeParser
 internalNode =
         char '+' *> mergeNode
     <|> node
