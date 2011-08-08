@@ -8,6 +8,8 @@ module ParseWml
 
 import Data.List
 import Text.Parsec.Prim (unexpected)
+import Text.Parsec.Pos (newPos)
+import Numeric
 
 import ApplicativeParsec
 
@@ -38,19 +40,19 @@ emptyNode = NNode $ N $ Node "" []
 -- merge nodes 
 data MergeNode = MergeNode
     {
-      mName :: String
-    , mBody :: NodeBody
+      mName :: !String
+    , mBody :: !NodeBody
     }
         deriving (Eq, Show)
 
 type NodeBody = [NodeItem]
 
-data WmlConfig = N Node
-               | M MergeNode
+data WmlConfig = N !Node
+               | M !MergeNode
         deriving (Eq, Show)
 
-data NodeItem = NAtt Attribute
-              | NNode WmlConfig
+data NodeItem = NAtt !Attribute
+              | NNode !WmlConfig
         deriving (Eq, Show)
 
 parseWml s = do
@@ -74,11 +76,41 @@ sourceOrDomain =
     <|> domain
 
 sourceInfo = do
-    many (noneOf "\n")
+    string "ine "
+    setSrcPos
+    h <- many (noneOf "\n")
+    s <- getState
+    setState $ ParseState (pDomain s) h
     anyChar
 
+setSrcPos = do
+    (src, line, column) <- historyItem
+    setPosition $ newPos src line column
+
+historyItem = do
+    line <- lineNumber
+    column <- columnNumber
+    src <- fileName 
+    return (src, line, column)
+
+lineNumber = do
+    spaces
+    ds <- many digit
+    spaces
+    let [(n,_)] = readDec ds
+    return n
+
+columnNumber = lineNumber
+
+fileName = do
+    spaces
+    between (char '"') (char '"') (many (noneOf "\""))
+
 domain = do
-    many (noneOf "\n")
+    string "textdomain "
+    d <- many (noneOf "\n")
+    st <- getState
+    setState $ ParseState d (pHistory st)
     anyChar
 
 -- Main node parser
@@ -142,8 +174,8 @@ internalNode =
 -- Attribute
 data Attribute = Attribute
     {
-      aKeys  :: [String]
-    , aValues :: [[AttributeValue]]
+      aKeys  :: ![String]
+    , aValues :: ![[AttributeValue]]
     }
         deriving (Eq, Show)
 
@@ -163,10 +195,10 @@ attributeValues = concatenatedAttributeValue `sepBy` comma
 
 concatenatedAttributeValue = attributeValue `sepBy` plus
 
-data AttributeValue = UnquotedString String
-                    | Formula String
-                    | QuotedString String
-                    | Translatable String
+data AttributeValue = UnquotedString !String
+                    | Formula !String
+                    | QuotedString !String
+                    | Translatable !TranslatableString
                     | Code String
         deriving (Eq, Show)
 
@@ -206,7 +238,19 @@ quotedStringValueRest =
         do { s <- quotedStringValue; return ('"' : s)}
     <|> return ""
 
-translatableStringValue = char '_' *> spaces *> quotedStringValue
+data TranslatableString = TranslatableString
+    {
+      tString :: !String
+    , tDomain :: !String
+    }
+        deriving (Eq, Show)
+
+translatableStringValue = do
+    char '_'
+    spaces 
+    s <- quotedStringValue
+    st <- getState
+    return $ TranslatableString s (pDomain st)
 
 literalCodeValue = do
     char '<'

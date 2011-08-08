@@ -149,7 +149,7 @@ preProcessWmlFile' = do
 
 historyItem = do
     pos <- getPosition
-    return (" " ++ (show $ sourceLine pos) ++ " " ++ (show $ sourceLine pos) ++ " " ++ sourceName pos)
+    return (" " ++ (show $ sourceLine pos) ++ " " ++ (show $ sourceLine pos) ++ " \"" ++ sourceName pos ++ "\"")
 
 getHistory Nothing = do
     st <- getState
